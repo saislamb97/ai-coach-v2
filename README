@@ -11,15 +11,15 @@
 This service exposes a focused REST API (DRF + Spectacular) and a WebSocket endpoint to:
 
 * Manage **Voices**, **Agents**, **Sessions**, **Chats**, **Slides**
-* Stream real-time chat via **WebSocket** (with optional TTS + visemes)
+* Stream real-time chat via **WebSocket** (token/sentence streaming, optional TTS + visemes, slide updates)
 * Browse OpenAPI docs (Swagger UI / ReDoc / raw schema)
 * Use an in-browser **Test Console** to exercise endpoints
 
 > 🔑 You will need:
 >
 > * `Api-Key` (tenant-scoped)
-> * `bot_id` (UUID of the Agent you’ll use)
-> * A `thread_id` of shape `user_16hex` (example: `user_ab12cd34ef56gh78`)
+> * `bot_id` (UUID of the Agent you’ll use, for WS)
+> * A `thread_id` matching `^user_[0-9a-f]{16}$` (example: `user_ab12cd34ef56gh78`)
 
 ---
 
@@ -55,19 +55,19 @@ Provide the API key via **one** of:
 
 ### Origin / Host / IP Allow-list
 
-Requests must also pass at least one allow-list check (configured per key):
+Requests must also pass at least one allow-list check (configured per API key):
 
 * Origin/Referer host is allowed, **or**
 * Host header is allowed, **or**
 * Client IP/CIDR is allowed
 
-Errors are standardized by DRF with a meaningful message.
+Errors are returned with meaningful messages; permission failures include both API-key and origin/host/IP checks.
 
 ---
 
 ## Response & Pagination
 
-List endpoints use DRF page-number pagination:
+List endpoints use DRF **page-number** pagination:
 
 ```json
 {
@@ -82,11 +82,10 @@ Use `?page=` and `?page_size=` (1–100). Field sets are defined by the API seri
 
 ---
 
-## REST Endpoints
-
-All resources follow standard ViewSet routes: `list`, `retrieve`, `create`, `update`, `partial_update`, `destroy`.
+## REST Endpoints (ViewSets)
 
 > Base prefix for all routes below is `/api/`.
+> Standard actions: `list`, `retrieve`, `create`, `update`, `partial_update`, `destroy`.
 
 ### 1) Voices
 
@@ -119,14 +118,14 @@ PUT    /api/agents/{id}/
 DELETE /api/agents/{id}/
 ```
 
-**Example — Retrieve one:**
+**Example — Retrieve one (by numeric id):**
 
 ```bash
 curl -H "Authorization: Api-Key $API_KEY" \
   https://ai-coach-pmkn.onrender.com/api/agents/1/
 ```
 
-> ℹ️ **SmartMediaMiddleware** upgrades relative media paths to absolute URLs in JSON responses where applicable (e.g., thumbnails, avatar files).
+> ℹ️ **SmartMediaMiddleware** absolutizes media URLs (thumbnails, avatar assets) in API/WS JSON responses.
 
 ---
 
@@ -141,8 +140,8 @@ PUT    /api/sessions/{id}/
 DELETE /api/sessions/{id}/
 ```
 
-Sessions are the durable containers for a user’s conversation (`thread_id` ~ `user_16hex`) and associated `agent`.
-Creation details depend on your serializer; see Swagger UI for required fields.
+Sessions link an end-user `thread_id` (shape `user_16hex`) to an `agent`.
+Exact create fields depend on your serializer; see Swagger UI for required inputs.
 
 ---
 
@@ -157,8 +156,8 @@ PUT    /api/chats/{id}/
 DELETE /api/chats/{id}/
 ```
 
-Chat entries are persisted automatically by the realtime pipeline after each completed response.
-The `POST` route exists but is typically used for admin/import flows rather than live generation.
+Chat entries are typically created automatically by the realtime pipeline after each completed response.
+`POST` exists mainly for admin/import use cases.
 
 ---
 
@@ -173,8 +172,8 @@ PUT    /api/slides/{id}/
 DELETE /api/slides/{id}/
 ```
 
-Slides store an **Editor.js** document (`editorjs`), plus optional `title`/`summary`.
-The engine can synthesize/extend slides and persist them to the session automatically.
+Slides store an **Editor.js** document (`editorjs`) plus optional `title`/`summary`.
+The engine can generate/update slides synchronously and persist them to the session.
 
 ---
 
@@ -185,6 +184,23 @@ The engine can synthesize/extend slides and persist them to the session automati
 ```
 wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id=<uuid>&thread_id=<user_16hex>&website_language=en
 ```
+
+**Query parameters**
+
+| Param              | Type   | Notes                                       |
+| ------------------ | ------ | ------------------------------------------- |
+| `bot_id`           | UUID   | Agent identifier (WS uses `bot_id`, not id) |
+| `thread_id`        | string | Must match `^user_[0-9a-f]{16}$`            |
+| `website_language` | string | UI hint (e.g., `en`)                        |
+| `api_key`          | string | Optional if sent in header/cookie           |
+
+**Limits & Behavior**
+
+* **Inbound message rate:** up to **20 Hz** (excess dropped)
+* **Audio upload size:** up to **25 MiB**
+* **Audio formats:** inferred from data URL or `format` hint (`webm`, `wav`, `m4a`, `ogg`, `mp3`)
+* **STT model:** `OPENAI_STT_MODEL` env (default `whisper-1`)
+* **Concurrency:** one active run at a time; new queries cancel the previous run
 
 ### Client → Server
 
@@ -197,31 +213,65 @@ wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id=<uuid>&thread_id=<user_16hex>&w
 { "type": "ping" }
 ```
 
-> **Audio size limit:** 25 MB.
-> Supported auto-detected formats include `webm`, `wav`, `m4a`, `ogg`, `mp3`.
+> **Audio tips:** Prefer `data:audio/<mime>;base64,<...>`; if you send raw base64, include a `format` hint.
 
 ### Server → Client
 
-* `connected` — handshake info (`bot_id`, `thread_id`)
+* `connected` — handshake info: `{ bot_id, thread_id }`
 * `text_query` — echo of user text (with `local_time`)
-* `response_start` / `response_done` / `response_ended`
-* `text_token` — streaming tokens
-* `text_sentence` — finalized sentences (with optional `emotion`)
-* `audio_response` — base64 TTS chunks (`audio`) + `viseme` frames
-* `slides_response` — `{title, summary, editorjs}` payload(s)
+* `response_start` → `text_token`* → `text_sentence`* → `response_done` → `response_ended`
+* `audio_muted` — `{ muted: boolean }`
+* `audio_response` — `{ audio: <base64>, viseme: number[][], local_time }`
+* `slides_response` — `{ slides: { title, summary, editorjs }, local_time }`
 * `slides_done` — end-of-slides marker
-* `audio_muted` — `{muted: boolean}`
 * `stop_audio` — confirmation
-* `error` — `{message}`
+* `error` — `{ message }`
 * `pong` — ping reply
 
-> **Slides streaming:** the engine may emit one or multiple `slides_response` updates; clients should use the **latest** `editorjs` received for the current answer.
+* **Streaming:**
+`text_token` are raw tokens; `text_sentence` contains finalized sentences and optional emotion:
+
+```json
+{
+  "type": "text_sentence",
+  "text": "Let's start with a simple plan.",
+  "emotion": {
+    "items": [
+      {"name":"Joy","intensity":2},
+      {"name":"Anger","intensity":1},
+      {"name":"Sadness","intensity":1}
+    ]
+  },
+  "local_time": "2025-10-30 10:00:02"
+}
+```
+
+**Timings payload**
+
+```json
+{
+  "type": "response_done",
+  "timings": {
+    "prepare_ms": 41,
+    "run_ms": 1850,
+    "total_ms": 2104,
+    "ws_total_sec": 2.12
+  }
+}
+```
+
+**Close codes (common)**
+
+* `4403` — auth failed (bad/missing API key or allow-list)
+* `4000` — missing required query params
+* `4004` — agent not found/inactive
+* `4005` — invalid `thread_id` pattern or session not found
 
 ---
 
-## Data Model (response snippets)
+## Data Model (examples)
 
-> Exact fields come from your serializers; below are representative shapes.
+> Exact fields are defined by your serializers; below are representative shapes.
 
 **Agent**
 
@@ -254,7 +304,7 @@ wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id=<uuid>&thread_id=<user_16hex>&w
   "session": 10,
   "query": "How do I plan my week?",
   "response": "Here’s a simple 3-step plan...",
-  "emotion": { "items": [{"name":"Joy","intensity":2}, ...], "stats": {...} },
+  "emotion": { "items": [{"name":"Joy","intensity":2}, {"name":"Anger","intensity":1}, {"name":"Sadness","intensity":1}], "stats": { "count": 3, "avg": {"Joy":2,"Anger":1,"Sadness":1}, "max": {"Joy":3,"Anger":1,"Sadness":1}, "last": {"Joy":2,"Anger":1,"Sadness":1} } },
   "viseme": { "segments": 3, "frames_total": 480, "last_frames": [[...]] },
   "meta": {
     "schema": "engine.v3",
@@ -277,7 +327,7 @@ wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id=<uuid>&thread_id=<user_16hex>&w
   "session": 10,
   "title": "Weekly Planning",
   "summary": "A compact guide to plan your week.",
-  "editorjs": { "time": 1698650000, "version": "2.x", "blocks": [ ... ] },
+  "editorjs": { "time": 1698650000, "version": "2.x", "blocks": [ /* ... */ ] },
   "updated_at": "2025-10-30T02:12:10Z"
 }
 ```
@@ -322,19 +372,19 @@ ws.onopen = () => ws.send(JSON.stringify({type:"text_query", text:"Hello!", mute
 ```
 aicoach/
 ├─ api/                 # DRF endpoints (Voices, Agents, Sessions, Chats, Slides)
-│  ├─ views.py          # ViewSets with ApiKeyAuthentication + permission
+│  ├─ views.py          # ModelViewSets with ApiKeyAuthentication + permission
 │  ├─ urls.py           # Routers + /api/test/ console
 │  └─ permissions.py    # HasValidAPIKeyAndAllowedOrigin (key + allow-list)
 ├─ engine/
-│  ├─ rag.py            # Orchestrates: prepare → run → finalize/persist
-│  ├─ nodes.py          # Streaming LLM + TTS + emotion + (sync) slide tool calls
-│  ├─ tools.py          # search_wikipedia, generate_or_update_slides (sync path)
+│  ├─ rag.py            # prepare → run (stream text, emotion, TTS, slides) → finalize/persist
+│  ├─ nodes.py          # sentence-level emotion; slide tool router; streaming logic
+│  ├─ tools.py          # search_wikipedia, generate_or_update_slides
 │  └─ tts_stt.py        # TTS/STT integration
 ├─ stream/
-│  ├─ consumers.py      # WebSocket ChatConsumer (WS protocol above)
-│  └─ ws_auth.py        # WS auth: key via header/query/cookie + origin/host/IP checks
+│  ├─ consumers.py      # WebSocket ChatConsumer (protocol above)
+│  └─ ws_auth.py        # WS auth: header/query/cookie + origin/host/IP checks
 ├─ agent/, memory/      # Models for Agent/Voice and Session/Chat/Slides
-├─ templates/test.html  # Simple test console (WS + REST)
+├─ templates/test.html  # Raw WS debug console
 └─ aicoach/settings.py  # DRF/Channels/Redis/CORS/etc.
 ```
 
@@ -370,12 +420,12 @@ DATABASE_PORT=5432
 * `REDIS_URL_CACHE` (default `redis://localhost:6379/1`)
 * `REDIS_URL_CHANNELS` (default `redis://localhost:6379/2`)
 
-> Channels uses the `CHANNEL_LAYERS` config to back WebSocket groups.
+> Channels uses `CHANNEL_LAYERS` for WS groups.
 
 ### CORS/CSRF
 
 * `CORS_ALLOW_ALL_ORIGINS` defaults to `true` for dev
-* `CSRF_TRUSTED_ORIGINS` includes `BASE_URL` and a few local hosts by default
+* `CSRF_TRUSTED_ORIGINS` includes `BASE_URL` and local hosts by default
 
 ---
 
@@ -399,11 +449,11 @@ python manage.py createsuperuser  # optional
 python manage.py collectstatic --noinput
 
 # 5) Start Redis (if not already)
-redis-server  # or use Docker: docker run -p 6379:6379 redis:7
+redis-server  # or: docker run -p 6379:6379 redis:7
 
-# 6) Run server (dev)
+# 6) Start server (dev)
 python manage.py runserver 0.0.0.0:8000
-# or ASGI via Daphne (recommended for WS):
+# or ASGI (recommended for WS):
 daphne -b 0.0.0.0 -p 8000 aicoach.asgi:application
 ```
 
@@ -417,8 +467,8 @@ Open:
 
 ## Notes & Tips
 
-* **WebSocket auth**: for quick demos, append `?api_key=...` in the WS URL; in production, prefer the `Authorization: Api-Key ...` header at the socket layer if your client library supports it.
-* **Thread IDs**: `thread_id` must match `^user_[0-9a-f]{16}$`. Generate one per end-user session.
-* **Slides**: The engine’s slide tool is **synchronous** in this build—expect typically a single `slides_response` followed by `slides_done`. Clients should treat additional updates (if any) as replacements.
-* **SmartMediaMiddleware**: media fields in API/WS JSON are automatically absolutized to your deployment’s base URL.
-* **Security**: The DRF permission class enforces both a valid API key and an allow-listed origin/host/IP.
+* **WebSocket auth:** For quick demos, append `?api_key=...` to the WS URL; in production, prefer the `Authorization: Api-Key ...` header if your client supports it.
+* **Thread IDs:** Must match `^user_[0-9a-f]{16}$`. Generate one per end-user session.
+* **Slides:** Slide generation/update is **synchronous** in this build—expect one or more `slides_response` followed by `slides_done`. Always use the **latest** payload received for a run.
+* **SmartMediaMiddleware:** Media fields in API/WS JSON are automatically converted to absolute URLs based on deployment.
+* **Security:** The DRF permission requires a **valid API key** *and* an allow-listed **Origin/Host/IP**—both are enforced.
