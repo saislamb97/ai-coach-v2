@@ -166,7 +166,11 @@ DATABASES = {
         "PASSWORD": os.getenv("DATABASE_PASSWORD", "postgres"),
         "HOST": os.getenv("DATABASE_HOST", "localhost"),
         "PORT": os.getenv("DATABASE_PORT", "5432"),
-        "OPTIONS": {"connect_timeout": 10},
+        "OPTIONS": {
+            "connect_timeout": 10,
+            # NEW: honor DB_SSLMODE env; Render should be "require"
+            "sslmode": os.getenv("DB_SSLMODE", "prefer"),
+        },
     }
 }
 
