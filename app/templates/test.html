@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WS Chat — RAW Debug Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 min-h-screen">
+  <div class="mx-auto max-w-7xl p-4 space-y-4">
+    <!-- Header -->
+    <header class="flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-semibold text-slate-900">WS Chat — RAW Debug</h1>
+        <p class="text-slate-500 text-sm">
+          Streams from <span class="font-mono">/ws/chat/</span>. Raw lines, no beautify.
+        </p>
+      </div>
+      <div class="flex items-center gap-3">
+        <div id="audioBadge" class="inline-flex items-center gap-2 rounded-full bg-slate-200 px-2 py-1 text-xs text-slate-700">
+          <span class="h-2 w-2 rounded-full bg-emerald-500 inline-block"></span> audio: unmuted
+        </div>
+        <div id="wsStatus" class="inline-flex items-center gap-2 rounded-full bg-slate-200 px-2 py-1 text-xs text-slate-700">
+          <span class="h-2 w-2 rounded-full bg-slate-500 inline-block"></span> disconnected
+        </div>
+      </div>
+    </header>
+
+    <!-- Connect -->
+    <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4">
+      <div class="grid gap-3 md:grid-cols-12">
+        <div class="md:col-span-4">
+          <label class="text-xs font-medium text-slate-600">Agent bot_id (UUID)</label>
+          <input id="botId" class="w-full rounded border border-slate-300 p-2" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div class="md:col-span-4">
+          <label class="text-xs font-medium text-slate-600">Visitor thread_id</label>
+          <input id="threadId" class="w-full rounded border border-slate-300 p-2" placeholder="user_0123456789abcdef">
+        </div>
+        <div class="md:col-span-2">
+          <label class="text-xs font-medium text-slate-600">Website language</label>
+          <select id="websiteLanguage" class="w-full rounded border border-slate-300 p-2">
+            <option value="en" selected>en</option>
+            <option value="es">es</option>
+            <option value="fr">fr</option>
+          </select>
+        </div>
+        <div class="md:col-span-2">
+          <label class="text-xs font-medium text-slate-600">API Key</label>
+          <input id="apiKey" class="w-full rounded border border-slate-300 p-2" placeholder="Api-Key value">
+        </div>
+
+        <div class="md:col-span-12 flex flex-wrap items-end gap-2 pt-1">
+          <button id="connectBtn" class="rounded bg-blue-600 px-3 py-2 text-white hover:bg-blue-700">Connect</button>
+          <button id="disconnectBtn" class="rounded bg-slate-200 px-3 py-2 text-slate-800 hover:bg-slate-300" disabled>Disconnect</button>
+
+          <div class="ml-2 inline-flex gap-2">
+            <button id="btnToggleMute" class="rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900" disabled>Mute</button>
+            <button id="btnStopAudio" class="rounded bg-rose-600 px-3 py-2 text-white hover:bg-rose-700" disabled>Stop Audio</button>
+          </div>
+
+          <button id="btnPing" class="ml-auto rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900" disabled>Ping</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Send -->
+    <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4">
+      <div class="flex gap-2">
+        <input id="chatInput" class="flex-1 rounded border border-slate-300 p-3 font-mono text-sm" placeholder='Type text and press Enter or click "Send"' />
+        <button id="sendBtn" class="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700" disabled>Send</button>
+      </div>
+
+      <div class="mt-3 grid gap-3 md:grid-cols-12">
+        <div class="md:col-span-8 flex items-center gap-3">
+          <button id="micStart" class="rounded bg-emerald-600 px-3 py-2 text-white hover:bg-emerald-700" disabled>🎤 Start Rec</button>
+          <button id="micStop" class="rounded bg-amber-600 px-3 py-2 text-white hover:bg-amber-700" disabled>⏹ Stop & Send</button>
+          <div id="micStatus" class="text-xs text-slate-600">idle</div>
+        </div>
+        <div class="md:col-span-4 flex items-center gap-3 justify-end">
+          <label class="inline-flex items-center gap-2 text-xs text-slate-700">
+            <input id="muteOnSend" type="checkbox" class="rounded border-slate-300 text-blue-600">
+            <span>Start this run muted</span>
+          </label>
+          <label class="text-xs text-slate-600">Playback MIME</label>
+          <select id="playbackMime" class="rounded border border-slate-300 p-1 text-sm">
+            <option>audio/mpeg</option>
+            <option>audio/ogg</option>
+            <option>audio/webm</option>
+            <option>audio/wav</option>
+            <option>audio/mp4</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- Streams -->
+    <section class="grid gap-4 lg:grid-cols-3">
+      <!-- TEXT -->
+      <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-semibold text-slate-700">Text stream</h2>
+          <div class="flex gap-2">
+            <button id="textCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
+            <button id="textClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 gap-2">
+          <div>
+            <div class="text-xs text-slate-500 mb-1">Tokens (raw)</div>
+            <pre id="textTokens" class="h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+          </div>
+          <div>
+            <div class="text-xs text-slate-500 mb-1">Sentences (+ emotion)</div>
+            <pre id="textSentences" class="h-60 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- SLIDES -->
+      <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-semibold text-slate-700">Slides stream (raw JSON)</h2>
+          <div class="flex gap-2">
+            <button id="slidesCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
+            <button id="slidesClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
+          </div>
+        </div>
+        <pre id="slidesLog" class="h-80 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+      </div>
+
+      <!-- AUDIO -->
+      <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-semibold text-slate-700">Audio stream (base64 + viseme)</h2>
+          <div class="flex gap-2">
+            <button id="audioCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
+            <button id="audioClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
+          </div>
+        </div>
+        <pre id="audioLog" class="h-80 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+        <audio id="audioPlayer" class="mt-2 w-full" controls></audio>
+      </div>
+    </section>
+
+    <!-- EVENTS -->
+    <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-semibold text-slate-700">Events</h2>
+        <div class="flex gap-2">
+          <button id="evtCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
+          <button id="evtClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
+        </div>
+      </div>
+      <pre id="evtLog" class="h-60 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+    </section>
+  </div>
+
+  <script>
+    // ---------- helpers ----------
+    const $ = (s) => document.querySelector(s);
+    const now = () => new Date().toLocaleTimeString();
+    const logLine = (el, line) => { el.textContent += (el.textContent ? "\\n" : "") + line; el.scrollTop = el.scrollHeight; };
+    const copyText = (el) => navigator.clipboard.writeText(el.textContent || "");
+    const clearEl = (el) => el.textContent = "";
+
+    function normalizeThreadId(raw) {
+      const x = (raw || '').trim();
+      // Accept legacy ids ending with 16 hex and coerce to user_XXXXXXXXXXXXXXX
+      const m = x.match(/([0-9a-f]{16})$/i);
+      if (x.startsWith('user_') && m) return `user_${m[1].toLowerCase()}`;
+      if (m) return `user_${m[1].toLowerCase()}`;
+      return x;
+    }
+
+    // base64 utils
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve((reader.result || '').toString());
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+    function b64ToBlob(b64, mime) {
+      let raw = b64, outMime = mime || $('#playbackMime').value || 'audio/mpeg';
+      if (typeof b64 === 'string' && b64.startsWith('data:')) {
+        outMime = b64.substring(5, b64.indexOf(';')) || outMime;
+        raw = b64.split(',')[1] || '';
+      }
+      const bin = atob(raw);
+      const buf = new Uint8Array(bin.length);
+      for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
+      return new Blob([buf], { type: outMime });
+    }
+
+    function formatEmotion(e) {
+      try {
+        if (!e || typeof e !== 'object') return '';
+        if (Array.isArray(e.items)) {
+          const map = {};
+          for (const it of e.items) {
+            if (!it || typeof it !== 'object') continue;
+            const n = (it.name || '').toString().toLowerCase();
+            const v = Math.max(1, Math.min(3, parseInt(it.intensity ?? 1, 10)));
+            map[n] = v;
+          }
+          const parts = [];
+          if (map.joy != null) parts.push(`Joy:${map.joy}`);
+          if (map.anger != null) parts.push(`Anger:${map.anger}`);
+          if (map.sadness != null) parts.push(`Sadness:${map.sadness}`);
+          return parts.length ? ` [Emotion ${parts.join(' ')}]` : '';
+        }
+        return '';
+      } catch { return ''; }
+    }
+
+    // ---------- WS ----------
+    let ws = null;
+    let audioMuted = false;
+
+    function setBadge(connected){
+      const el = $('#wsStatus');
+      el.innerHTML = `<span class="h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-500'} inline-block"></span> ${connected ? 'connected' : 'disconnected'}`;
+      el.classList.toggle('bg-emerald-100', connected);
+      el.classList.toggle('bg-slate-200', !connected);
+    }
+    function setAudioBadge(muted){
+      audioMuted = !!muted;
+      const el = $('#audioBadge');
+      const dot = audioMuted ? 'bg-rose-500' : 'bg-emerald-500';
+      const txt = audioMuted ? 'audio: muted' : 'audio: unmuted';
+      el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> ${txt}`;
+      el.classList.toggle('bg-rose-100', audioMuted);
+      el.classList.toggle('bg-emerald-100', !audioMuted);
+      $('#btnToggleMute').textContent = audioMuted ? 'Unmute' : 'Mute';
+    }
+
+    function buildWsUrl() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const bot = encodeURIComponent($('#botId').value.trim());
+      const thr = encodeURIComponent(normalizeThreadId($('#threadId').value.trim()));
+      const lang = encodeURIComponent($('#websiteLanguage').value.trim() || 'en');
+      const key = encodeURIComponent($('#apiKey').value.trim());
+      return `${proto}://${location.host}/ws/chat/?bot_id=${bot}&thread_id=${thr}&website_language=${lang}&api_key=${key}`;
+    }
+    function setAuthCookie(){
+      const key = $('#apiKey').value.trim();
+      if (!key) return;
+      document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax`;
+    }
+
+    // ---------- audio queue ----------
+    const audioEl = $('#audioPlayer');
+    const audioQ = [];
+    let playing = false;
+
+    function clearAudioQueue() {
+      try { audioEl.pause(); } catch {}
+      audioEl.removeAttribute('src');
+      audioEl.load();
+      while (audioQ.length) {
+        const url = audioQ.shift();
+        try { URL.revokeObjectURL(url); } catch {}
+      }
+      playing = false;
+    }
+
+    function queueAudio(b64, info='') {
+      try {
+        const mime = $('#playbackMime').value;
+        const blob = b64ToBlob(b64, mime);
+        const url = URL.createObjectURL(blob);
+        audioQ.push(url);
+        logLine($('#audioLog'), `[${now()}] queued (${mime}) ${info}`);
+        playNext();
+      } catch (e) {
+        logLine($('#audioLog'), `[${now()}] ! queue error: ${e}`);
+      }
+    }
+    function playNext(){
+      if (playing || !audioQ.length) return;
+      playing = true;
+      const url = audioQ.shift();
+      audioEl.src = url;
+      audioEl.onended = audioEl.onerror = () => {
+        try { URL.revokeObjectURL(url); } catch {}
+        playing = false;
+        playNext();
+      };
+      audioEl.play().catch(err => {
+        logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
+        playing = false;
+      });
+    }
+
+    function formatVisemeFrames(vis, opts = {}) {
+      const frames = Array.isArray(vis) ? vis : [];
+      const maxFrames = opts.maxFrames ?? 24;
+      const maxFloats = opts.maxFloats ?? 15;
+      const round = (n) => (typeof n === 'number' ? Number(n.toFixed(3)) : 0).toFixed(3);
+      const rows = [];
+      const count = Math.min(frames.length, maxFrames);
+      for (let i = 0; i < count; i++) {
+        const f = Array.isArray(frames[i]) ? frames[i] : [];
+        const floats = f.slice(0, maxFloats).map(round).join(', ');
+        rows.push(`${String(i).padStart(3, '0')}: [ ${floats} ]`);
+      }
+      if (frames.length > count) rows.push(`… (${frames.length - count} more frame(s) not shown)`);
+      return rows.join('\n');
+    }
+
+    // ---------- UI wiring ----------
+    $('#connectBtn').onclick = (e) => {
+      e.preventDefault();
+      const bot=$('#botId').value.trim(), thr=$('#threadId').value.trim(), key=$('#apiKey').value.trim();
+      if (!bot || !thr || !key) { alert('bot_id, thread_id, api key required'); return; }
+      $('#threadId').value = normalizeThreadId(thr);
+      setAuthCookie();
+      const url = buildWsUrl();
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        setBadge(true);
+        $('#sendBtn').disabled = false;
+        $('#disconnectBtn').disabled = false;
+        $('#btnPing').disabled = false;
+        $('#micStart').disabled = false;
+        $('#btnToggleMute').disabled = false;
+        $('#btnStopAudio').disabled = false;
+        logLine($('#evtLog'), `[${now()}] open ${url}`);
+      };
+      ws.onclose = (ev) => {
+        setBadge(false);
+        $('#sendBtn').disabled = true;
+        $('#disconnectBtn').disabled = true;
+        $('#btnPing').disabled = true;
+        $('#micStart').disabled = true;
+        $('#micStop').disabled = true;
+        $('#btnToggleMute').disabled = true;
+        $('#btnStopAudio').disabled = true;
+        logLine($('#evtLog'), `[${now()}] close code=${ev.code}`);
+      };
+      ws.onerror = (ev) => logLine($('#evtLog'), `[${now()}] error ${ev?.message || ''}`);
+
+      ws.onmessage = (evt) => {
+        let msg = {};
+        try { msg = JSON.parse(evt.data || '{}'); } catch { msg = {}; }
+        const t = msg.type || '';
+        switch (t) {
+          case 'connected':
+            logLine($('#evtLog'), `[${now()}] connected bot=${msg.bot_id} thread=${msg.thread_id}`);
+            break;
+
+          case 'response_start':
+            logLine($('#evtLog'), `[${now()}] response_start`);
+            break;
+
+          case 'audio_muted':
+            setAudioBadge(!!msg.muted);
+            logLine($('#evtLog'), `[${now()}] audio_muted=${!!msg.muted}`);
+            break;
+
+          case 'stop_audio':
+            clearAudioQueue();
+            logLine($('#evtLog'), `[${now()}] stop_audio`);
+            break;
+
+          case 'text_token': {
+            const tok = (msg.token || '').toString();
+            $('#textTokens').textContent += tok;
+            $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
+            break;
+          }
+
+          case 'text_sentence': {
+            const s = (msg.text || '').toString();
+            const emoStr = formatEmotion(msg.emotion);
+            logLine($('#textSentences'), `[${now()}] ${s}${emoStr}`);
+            break;
+          }
+
+          case 'slides_response': {
+            const raw = ('slides' in msg) ? {slides: msg.slides} :
+                        ('slides_raw' in msg) ? {slides_raw: msg.slides_raw} : msg;
+            logLine($('#slidesLog'), `[${now()}] ${JSON.stringify(raw)}`);
+            break;
+          }
+
+          case 'slides_done':
+            logLine($('#slidesLog'), `[${now()}] slides_done`);
+            break;
+
+          case 'audio_response': {
+            const b64 = msg.audio || '';
+            const vis = Array.isArray(msg.viseme) ? msg.viseme : [];
+            const preview = typeof b64 === 'string'
+              ? (b64.startsWith('data:') ? b64.split(',')[1] || '' : b64)
+              : '';
+            const head = preview.slice(0, 96);
+            queueAudio(b64, `frames=${vis.length} len=${preview.length}`);
+            const pretty = formatVisemeFrames(vis, { maxFrames: 24 });
+            logLine($('#audioLog'), `[${now()}] audio_response head=${head}…\nidx: [ v0, v1, … v14 ]\n${pretty}`);
+            break;
+          }
+
+          case 'response_done':
+            logLine($('#evtLog'), `[${now()}] response_done timings=${JSON.stringify(msg.timings || {})}`);
+            break;
+
+          case 'response_ended':
+            logLine($('#evtLog'), `[${now()}] response_ended`);
+            break;
+
+          case 'text_query':
+            logLine($('#evtLog'), `[${now()}] echo text_query "${(msg.text||'').slice(0,200)}"`);
+            break;
+
+          case 'pong':
+            logLine($('#evtLog'), `[${now()}] pong`);
+            break;
+
+          case 'error':
+            logLine($('#evtLog'), `[${now()}] ERROR ${msg.message || 'unknown'}`);
+            break;
+
+          default:
+            logLine($('#evtLog'), `[${now()}] ${t || 'unknown'} ${JSON.stringify(msg)}`);
+        }
+      };
+    };
+
+    $('#disconnectBtn').onclick = (e) => { e.preventDefault(); if (ws) { ws.close(); ws = null; } };
+
+    $('#btnPing').onclick = (e) => { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'ping'})); };
+
+    $('#btnToggleMute').onclick = (e) => {
+      e.preventDefault();
+      if (!ws || ws.readyState !== 1) return;
+      const nextMuted = !audioMuted;
+      ws.send(JSON.stringify({ type: nextMuted ? 'mute_audio' : 'unmute_audio' }));
+      // UI updates when server echoes audio_muted
+    };
+
+    $('#btnStopAudio').onclick = (e) => {
+      e.preventDefault();
+      if (!ws || ws.readyState !== 1) return;
+      ws.send(JSON.stringify({ type: 'stop_audio' }));
+      clearAudioQueue(); // stop immediately on client
+    };
+
+    $('#sendBtn').onclick = sendText;
+    $('#chatInput').addEventListener('keydown', (e)=>{
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+    });
+    function sendText(){
+      if (!ws || ws.readyState !== 1) return;
+      const text = $('#chatInput').value.trim();
+      if (!text) return;
+      const muted = $('#muteOnSend').checked;
+      ws.send(JSON.stringify({
+        type: 'text_query',
+        text,
+        local_time: new Date().toLocaleString(),
+        muteAudio: muted
+      }));
+      $('#chatInput').value = '';
+      if (muted !== audioMuted) {
+        // UI will update when server echoes audio_muted; no local toggle here.
+      }
+    }
+
+    // ---------- mic ----------
+    let mediaStream = null, recorder = null, chunks = [];
+    $('#micStart').onclick = async (e) => {
+      e.preventDefault();
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mime = 'audio/webm';
+        recorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 64000 });
+        chunks = [];
+        recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+        recorder.onstart = () => { $('#micStatus').textContent = `recording… (${mime})`; $('#micStart').disabled = true; $('#micStop').disabled = false; };
+        recorder.start();
+      } catch (e2) {
+        $('#micStatus').textContent = `! mic error: ${e2}`;
+      }
+    };
+    $('#micStop').onclick = async (e) => {
+      e.preventDefault();
+      try {
+        if (!recorder) return;
+        await new Promise(res => { recorder.onstop = res; recorder.stop(); });
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+        $('#micStart').disabled = false; $('#micStop').disabled = true;
+        $('#micStatus').textContent = `encoding…`;
+
+        const dataUrl = await blobToBase64(blob); // data:audio/webm;base64,XXXX
+        const b64 = (dataUrl.split(',')[1] || '');
+        $('#micStatus').textContent = `sending ${b64.length} bytes…`;
+
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({
+            type: 'audio_query',
+            audio: dataUrl,
+            format: 'webm',
+            muteAudio: $('#muteOnSend').checked
+          }));
+          logLine($('#evtLog'), `[${now()}] sent audio_query size=${b64.length}`);
+        } else {
+          $('#micStatus').textContent = `not connected`;
+        }
+      } catch (e3) {
+        $('#micStatus').textContent = `! send error: ${e3}`;
+      } finally {
+        recorder = null; mediaStream = null; chunks = [];
+        setTimeout(()=>$('#micStatus').textContent='idle', 800);
+      }
+    };
+
+    // ---------- panel copy/clear ----------
+    $('#textCopy').onclick = ()=>{
+      const txt = ($('#textTokens').textContent || '') + '\\n' + ($('#textSentences').textContent || '');
+      navigator.clipboard.writeText(txt);
+    };
+    $('#textClear').onclick = ()=>{ clearEl($('#textTokens')); clearEl($('#textSentences')); };
+    $('#slidesCopy').onclick = ()=>copyText($('#slidesLog'));
+    $('#slidesClear').onclick = ()=>clearEl($('#slidesLog'));
+    $('#audioCopy').onclick = ()=>copyText($('#audioLog'));
+    $('#audioClear').onclick = ()=>{
+      clearEl($('#audioLog'));
+      clearAudioQueue();
+    };
+    $('#evtCopy').onclick = ()=>copyText($('#evtLog'));
+    $('#evtClear').onclick = ()=>clearEl($('#evtLog'));
+  </script>
+</body>
+</html>
