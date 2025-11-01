@@ -58,8 +58,7 @@ GENDER_CHOICES: List[Tuple[str, str]] = [
 SERVICE_CHOICES: List[Tuple[str, str]] = [
     ("gtts", "gTTS"),
     ("elevenlabs", "ElevenLabs"),
-    ("openai", "OpenAI"),
-    ("google", "Google"),
+    ("openai", "OpenAI")
 ]
 
 
@@ -86,23 +85,32 @@ COUNTRY_CHOICES: List[Tuple[str, str]] = get_country_choices()
 # ---- gTTS ----
 # gTTS doesn't have named voices; voice_id encodes language + accent via TLD: "{lang}@{tld}"
 GTTS_VOICES: Dict[str, Dict[str, str]] = {
-    "en@com":       {"label": "English (US)",           "gender": "male"},
-    "en@co.uk":     {"label": "English (UK)",           "gender": "male"},
-    "en@com.au":    {"label": "English (AU)",           "gender": "male"},
-    "en@co.in":     {"label": "English (India)",        "gender": "male"},
-    "en@ie":        {"label": "English (Ireland)",      "gender": "male"},
-    "en@co.za":     {"label": "English (South Africa)", "gender": "male"},
-    "es@com":       {"label": "Spanish (Global)",       "gender": "female"},
-    "es@com.mx":    {"label": "Spanish (Mexico)",       "gender": "female"},
-    "fr@fr":        {"label": "French (France)",        "gender": "female"},
-    "de@de":        {"label": "German (Germany)",       "gender": "male"},
-    "it@it":        {"label": "Italian (Italy)",        "gender": "female"},
-    "pt@com.br":    {"label": "Portuguese (Brazil)",    "gender": "female"},
-    "hi@co.in":     {"label": "Hindi (India)",          "gender": "male"},
-    "ar@com.sa":    {"label": "Arabic (Saudi)",         "gender": "male"},
-    "ja@co.jp":     {"label": "Japanese (Japan)",       "gender": "female"},
-    "ko@co.kr":     {"label": "Korean (Korea)",         "gender": "female"},
-    "zh-cn@com.hk": {"label": "Chinese (Mandarin)",     "gender": "female"},
+    "en@com":    {"label": "English",      "gender": "male"},
+    "es@com":    {"label": "Spanish",      "gender": "female"},
+    "fr@fr":     {"label": "French",       "gender": "female"},
+    "de@de":     {"label": "German",       "gender": "male"},
+    "it@it":     {"label": "Italian",      "gender": "female"},
+    "pt@com.br": {"label": "Portuguese",   "gender": "female"},
+    "hi@co.in":  {"label": "Hindi",        "gender": "male"},
+    "ar@com.sa": {"label": "Arabic",       "gender": "male"},
+    "ja@co.jp":  {"label": "Japanese",     "gender": "female"},
+    "ko@co.kr":  {"label": "Korean",       "gender": "female"},
+    "zh-cn@com.hk": {"label": "Chinese",   "gender": "female"},
+}
+
+# ---- OpenAI TTS ----
+OPENAI_VOICES: Dict[str, Dict[str, str]] = {
+    "alloy":   {"label": "Alloy",   "gender": "male"},
+    "echo":    {"label": "Echo",    "gender": "male"},
+    "fable":   {"label": "Fable",   "gender": "male"},
+    "onyx":    {"label": "Onyx",    "gender": "male"},
+    "nova":    {"label": "Nova",    "gender": "female"},
+    "shimmer": {"label": "Shimmer", "gender": "female"},
+    "ash":     {"label": "Ash",     "gender": "male"},
+    "ballad":  {"label": "Ballad",  "gender": "female"},
+    "coral":   {"label": "Coral",   "gender": "female"},
+    "sage":    {"label": "Sage",    "gender": "male"},
+    "verse":   {"label": "Verse",   "gender": "male"},
 }
 
 # ---- ElevenLabs (popular defaults subset) ----
@@ -137,5 +145,6 @@ ELEVENLABS_VOICES: Dict[str, Dict[str, str]] = {
 # Grouped (optgroup) choices for admin selects — sorted by label
 ALL_VOICE_CHOICES: List[Tuple[str, List[Tuple[str, str]]]] = [
     ("gTTS",       sorted([(f"gtts::{vid}",      meta["label"]) for vid, meta in GTTS_VOICES.items()], key=lambda x: x[1])),
+    ("OpenAI", sorted([(f"openai::{vid}",  meta["label"]) for vid, meta in OPENAI_VOICES.items()], key=lambda x: x[1])),
     ("ElevenLabs", sorted([(f"elevenlabs::{vid}", meta["label"]) for vid, meta in ELEVENLABS_VOICES.items()], key=lambda x: x[1])),
 ]

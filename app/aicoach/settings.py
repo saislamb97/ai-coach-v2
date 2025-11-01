@@ -73,9 +73,11 @@ INSTALLED_APPS = [
     "django.contrib.postgres",
 
     "corsheaders",
+
     "rest_framework",
-    "drf_spectacular",
     "django_filters",
+    "drf_spectacular",
+
     "storages",
 
     # Apps
@@ -206,33 +208,34 @@ CHANNEL_LAYERS = {
 # =============================================================================
 # DRF / Swagger
 # =============================================================================
+# settings.py
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        # "rest_framework.authentication.SessionAuthentication",
-        "api.auth.ApiKeyAuthentication"
-        ],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["api.auth.ApiKeyAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
         "api.permissions.HasValidAPIKeyAndAllowedOrigin",
     ],
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
-    "EXCEPTION_HANDLER": "api.exceptions.custom_exception_handler",
-
+    "DEFAULT_PAGINATION_CLASS": "api.pagination.DefaultPageNumberPagination",
     "PAGE_SIZE": 10,
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
+    "EXCEPTION_HANDLER": "api.exceptions.custom_exception_handler",
 }
 
-# settings.py
 SPECTACULAR_SETTINGS = {
     "TITLE": "aicoach API",
     "DESCRIPTION": "Welcome to aicoach Agent Portal.",
     "VERSION": "1.0.0",
     "SCHEMA_PATH_PREFIX": r"/api/",
-    "CONTACT": {
-        "name": "aicoach AI Agent Team",
-        "email": "support@nudgyt.com",
-        "url": "https://aicoach.nudgyt.com",
+    "CONTACT": {"name": "aicoach AI Agent Team", "email": "support@nudgyt.com", "url": "https://aicoach.nudgyt.com"},
+    "SECURITY_SCHEMES": {
+        "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Format: `Api-Key <key>`"}
     },
+    "SECURITY": [{"ApiKeyAuth": []}],
 }
 
 # =============================================================================
@@ -288,8 +291,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Theme and branding
 SIMPLEUI_DEFAULT_THEME = 'admin.lte.css'
 SIMPLEUI_HOME_TITLE = 'aicoach AI System'
-SIMPLEUI_LOGO = '/static/img/logo.png'
-SIMPLEUI_FAVICON = '/static/img/favicon.ico'
+SIMPLEUI_LOGO = '/static/logo.png'
+SIMPLEUI_FAVICON = '/static/favicon.ico'
 SIMPLEUI_HOME_ICON = 'fa fa-home'
 
 # Home page modules
@@ -332,7 +335,7 @@ SIMPLEUI_CONFIG = {
                     'newTab': True
                 },
                 {
-                    'name': 'Test Endpoint',
+                    'name': 'Test Console',
                     'icon': 'fa fa-vial',
                     'url': '/api/test/',
                     'newTab': True

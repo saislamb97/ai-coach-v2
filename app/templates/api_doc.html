@@ -1,3 +1,4 @@
+{% load static %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -8,6 +9,8 @@
 
   <!-- Tailwind (with Typography plugin) -->
   <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+
+  <link rel="shortcut icon" type="image/x-icon" href="{% static 'favicon.ico' %}" />
 
   <!-- Highlight.js for code syntax highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
@@ -115,6 +118,46 @@
               onclick="copyText(event, 'https://ai-coach-pmkn.onrender.com/')">Copy</button>
           </div>
         </div>
+      </div>
+
+      <h2 id="api-docs">Important URLs</h2>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[640px] w-full text-sm pdf-avoid-break">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Name</th>
+              <th class="px-4 py-3 font-semibold">URL</th>
+              <th class="px-4 py-3 font-semibold">Notes</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="px-4 py-3 font-medium">Admin</td>
+              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/admin/">/admin/</a></td>
+              <td class="px-4 py-3">Interactive Admin Panel</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Swagger UI</td>
+              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/swagger-ui/">/api/schema/swagger-ui/</a></td>
+              <td class="px-4 py-3">Interactive API docs</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">ReDoc</td>
+              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/redoc/">/api/schema/redoc/</a></td>
+              <td class="px-4 py-3">Reference docs</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Raw Schema</td>
+              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/">/api/schema/</a></td>
+              <td class="px-4 py-3">OpenAPI JSON</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Test Console</td>
+              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/test/">/api/test/</a></td>
+              <td class="px-4 py-3">WS &amp; REST console</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <h2 id="overview">Overview</h2>
@@ -290,47 +333,6 @@ asyncio.run(main())</code></pre>
         <li>Server will infer extension from the data URL or <code>format</code> (<code>wav/m4a/ogg/webm/mp3</code>).</li>
         <li>On playback, consider queueing chunks and handling user mute/stop actions.</li>
       </ul>
-
-      <h2 id="api-docs">API Docs (REST URLs)</h2>
-      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
-        <table class="min-w-[640px] w-full text-sm pdf-avoid-break">
-          <thead class="bg-slate-50 text-left text-slate-600">
-            <tr>
-              <th class="px-4 py-3 font-semibold">Name</th>
-              <th class="px-4 py-3 font-semibold">URL</th>
-              <th class="px-4 py-3 font-semibold">Notes</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-100">
-            <tr>
-              <td class="px-4 py-3 font-medium">Admin</td>
-              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/admin/">/admin/</a></td>
-              <td class="px-4 py-3">Interactive Admin Panel</td>
-            </tr>
-            <tr>
-              <td class="px-4 py-3 font-medium">Swagger UI</td>
-              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/swagger-ui/">/api/schema/swagger-ui/</a></td>
-              <td class="px-4 py-3">Interactive API docs</td>
-            </tr>
-            <tr>
-              <td class="px-4 py-3 font-medium">ReDoc</td>
-              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/redoc/">/api/schema/redoc/</a></td>
-              <td class="px-4 py-3">Reference docs</td>
-            </tr>
-            <tr>
-              <td class="px-4 py-3 font-medium">Raw Schema</td>
-              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/schema/">/api/schema/</a></td>
-              <td class="px-4 py-3">OpenAPI JSON</td>
-            </tr>
-            <tr>
-              <td class="px-4 py-3 font-medium">Test Endpoint</td>
-              <td class="px-4 py-3"><a class="link-underline text-indigo-700" href="/api/test/">/api/test/</a></td>
-              <td class="px-4 py-3">WS &amp; REST console</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
     </article>
   </main>
 
