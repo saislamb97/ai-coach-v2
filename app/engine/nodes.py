@@ -43,7 +43,7 @@ class Settings:
     emotion_timeout_s: float = 6.0
     emotion_retries: int = 2
 
-    viseme_max_frames_to_store: int = 240  # last 24s @ 10fps
+    viseme_max_frames_to_store: int = 1500
 
 S = Settings()
 
@@ -180,58 +180,94 @@ def _get_latest_slides_outline(session: Session) -> str:
 # Emotion & Viseme helpers
 # =============================================================================
 def _emotion_state_init() -> Dict[str, Any]:
+    # Track dominant counts + avg intensity for that label, plus the last item
     return {
         "count": 0,
-        "sum": {"Joy": 0, "Anger": 0, "Sadness": 0},
-        "max": {"Joy": 1, "Anger": 1, "Sadness": 1},
-        "last": {"Joy": 1, "Anger": 1, "Sadness": 1},
-        "items": [],
+        "hist": {"Joy": 0, "Anger": 0, "Sadness": 0},
+        "sum_intensity": {"Joy": 0, "Anger": 0, "Sadness": 0},
+        "last": {"name": "Joy", "intensity": 1},
+        "items": [],  # recent single-item samples, capped to 20
     }
 
 def _emotion_state_update(state: Dict[str, Any], emo: Dict[str, Any]) -> None:
+    """
+    Accepts emotion dicts in a flexible shape and normalizes them to ONE item:
+      - {"items":[{"name":"Joy","intensity":2}]}
+      - {"item":{"name":"Joy","intensity":2}}
+      - {"name":"Joy","intensity":2}
+      - legacy: {"items":[{Joy},{Anger},{Sadness}]}
+    """
     try:
-        items = emo.get("items") or []
-        by = {i.get("name"): int(i.get("intensity", 1)) for i in items if isinstance(i, dict) and "name" in i}
-        for k in ("Joy", "Anger", "Sadness"):
-            v = max(1, min(3, int(by.get(k, state["last"].get(k, 1)))))
-            state["sum"][k] = int(state["sum"][k]) + v
-            state["max"][k] = max(int(state["max"][k]), v)
-            state["last"][k] = v
-        state["count"] = int(state["count"]) + 1
-        state["items"].append({"Joy": state["last"]["Joy"], "Anger": state["last"]["Anger"], "Sadness": state["last"]["Sadness"]})
+        def _clamp(v: Any) -> int:
+            try:
+                n = int(v)
+            except Exception:
+                n = 1
+            return 1 if n < 1 else 3 if n > 3 else n
+
+        # pick a single best item from various shapes
+        item = None
+        if isinstance(emo, dict):
+            if isinstance(emo.get("item"), dict):
+                item = emo["item"]
+            elif isinstance(emo.get("items"), list):
+                items = [i for i in emo["items"] if isinstance(i, dict)]
+                if len(items) == 1:
+                    item = items[0]
+                elif len(items) >= 3:
+                    # legacy 3-item payload → choose max intensity; tie-break Joy > Anger > Sadness
+                    order = {"Joy": 3, "Anger": 2, "Sadness": 1}
+                    best = None
+                    for it in items:
+                        nm = str(it.get("name", "")).title()
+                        iv = _clamp(it.get("intensity", 1))
+                        if nm not in ("Joy", "Anger", "Sadness"):
+                            continue
+                        if (best is None or iv > best[1] or (iv == best[1] and order.get(nm, 0) > order.get(best[0], 0))):
+                            best = (nm, iv)
+                    if best:
+                        item = {"name": best[0], "intensity": best[1]}
+            elif "name" in emo and "intensity" in emo:
+                item = {"name": str(emo["name"]).title(), "intensity": _clamp(emo["intensity"])}
+
+        if not item:
+            item = {"name": "Joy", "intensity": 1}
+
+        name = str(item.get("name", "Joy")).title()
+        if name not in ("Joy", "Anger", "Sadness"):
+            name = "Joy"
+        inten = _clamp(item.get("intensity", 1))
+
+        state["count"] = int(state.get("count", 0)) + 1
+        state["hist"][name] = int(state["hist"].get(name, 0)) + 1
+        state["sum_intensity"][name] = int(state["sum_intensity"].get(name, 0)) + inten
+        state["last"] = {"name": name, "intensity": inten}
+        state["items"].append(state["last"].copy())
         if len(state["items"]) > 20:
             state["items"].pop(0)
     except Exception:
         pass
 
 def _emotion_state_finalize(state: Dict[str, Any]) -> Dict[str, Any]:
-    c = max(1, int(state.get("count", 0)) or 1)
-    avg = {
-        "Joy": round(state["sum"]["Joy"] / c),
-        "Anger": round(state["sum"]["Anger"] / c),
-        "Sadness": round(state["sum"]["Sadness"] / c),
-    }
-    for k in avg:
-        avg[k] = min(3, max(1, int(avg[k])))
+    # Choose the most frequent emotion as the final one; average its intensity.
+    hist = {k: int(v) for k, v in (state.get("hist") or {}).items()}
+    sums = {k: int(v) for k, v in (state.get("sum_intensity") or {}).items()}
+    if not hist:
+        hist = {"Joy": 1, "Anger": 0, "Sadness": 0}
+        sums = {"Joy": 1, "Anger": 0, "Sadness": 0}
+
+    # tie-break Joy > Anger > Sadness
+    order = {"Joy": 3, "Anger": 2, "Sadness": 1}
+    best = max(hist.items(), key=lambda kv: (kv[1], order.get(kv[0], 0)))[0]
+    cnt = max(1, hist.get(best, 0))
+    avg_int = min(3, max(1, round(sums.get(best, 1) / cnt)))
+
     return {
-        "items": [
-            {"name": "Joy", "intensity": avg["Joy"]},
-            {"name": "Anger", "intensity": avg["Anger"]},
-            {"name": "Sadness", "intensity": avg["Sadness"]},
-        ],
+        "items": [{"name": best, "intensity": int(avg_int)}],  # <= single-item final emotion
         "stats": {
-            "count": c,
-            "avg": avg,
-            "max": {
-                "Joy": int(state["max"]["Joy"]),
-                "Anger": int(state["max"]["Anger"]),
-                "Sadness": int(state["max"]["Sadness"]),
-            },
-            "last": {
-                "Joy": int(state["last"]["Joy"]),
-                "Anger": int(state["last"]["Anger"]),
-                "Sadness": int(state["last"]["Sadness"]),
-            },
+            "count": int(state.get("count", 0)),
+            "hist": hist,
+            "last": state.get("last", {"name": "Joy", "intensity": 1}),
         },
     }
 
@@ -463,45 +499,92 @@ async def _stream_text_with_audio(state: QAState):
 # Emotion classifier
 # =============================================================================
 async def _classify_emotion(*, sentence: str, state: QAState) -> Dict[str, Any]:
+    """
+    Returns a SINGLE dominant emotion in the backward-compatible shape:
+      {"items":[{"name":"Joy"|"Anger"|"Sadness", "intensity": 1..3}]}
+    """
     sys = (
-        "You are an emotion classifier. Return STRICT JSON ONLY.\n"
-        "There are 3 emotions: Joy, Anger, Sadness. Each must have intensity 1..3.\n"
-        'Output: {"items":[{"name":"Joy","intensity":N},{"name":"Anger","intensity":N},{"name":"Sadness","intensity":N}]}\n'
+        "You are an emotion selector. Choose EXACTLY ONE best-matching emotion for the sentence.\n"
+        "Allowed names: Joy, Anger, Sadness. Intensity: integer 1..3 (1=low, 3=high).\n"
+        "Return STRICT JSON ONLY, no prose, exactly this shape:\n"
+        '{"items":[{"name":"Joy","intensity":2}]}\n'
+        "Always return a single-object array in `items`."
     )
     user = f"# Sentence\n{(sentence or '').strip()}"
     attempt = 0
+
+    def _normalize_one(payload: Any) -> Dict[str, Any]:
+        def _clamp(v: Any) -> int:
+            try:
+                n = int(v)
+            except Exception:
+                n = 1
+            return 1 if n < 1 else 3 if n > 3 else n
+
+        if isinstance(payload, dict):
+            # preferred: {"items":[{...}]}
+            if isinstance(payload.get("items"), list) and payload["items"]:
+                first = payload["items"][0]
+                if isinstance(first, dict):
+                    nm = str(first.get("name", "Joy")).title()
+                    iv = _clamp(first.get("intensity", 1))
+                    if nm not in ("Joy", "Anger", "Sadness"):
+                        nm = "Joy"
+                    return {"items": [{"name": nm, "intensity": iv}]}
+
+            # alt: {"item": {...}}
+            if isinstance(payload.get("item"), dict):
+                it = payload["item"]
+                nm = str(it.get("name", "Joy")).title()
+                iv = _clamp(it.get("intensity", 1))
+                if nm not in ("Joy", "Anger", "Sadness"):
+                    nm = "Joy"
+                return {"items": [{"name": nm, "intensity": iv}]}
+
+            # legacy: three items → pick max intensity with tie-break
+            if isinstance(payload.get("items"), list) and len(payload["items"]) >= 3:
+                order = {"Joy": 3, "Anger": 2, "Sadness": 1}
+                best = None
+                for it in payload["items"]:
+                    if not isinstance(it, dict): 
+                        continue
+                    nm = str(it.get("name", "")).title()
+                    iv = _clamp(it.get("intensity", 1))
+                    if nm not in order:
+                        continue
+                    if (best is None or iv > best[1] or (iv == best[1] and order[nm] > order[best[0]])):
+                        best = (nm, iv)
+                if best:
+                    return {"items": [{"name": best[0], "intensity": best[1]}]}
+
+            # alt: {"name":..., "intensity":...}
+            if "name" in payload and "intensity" in payload:
+                nm = str(payload.get("name", "Joy")).title()
+                iv = _clamp(payload.get("intensity", 1))
+                if nm not in ("Joy", "Anger", "Sadness"):
+                    nm = "Joy"
+                return {"items": [{"name": nm, "intensity": iv}]}
+
+        # fallback
+        return {"items": [{"name": "Joy", "intensity": 1}]}
+
     while attempt <= S.emotion_retries:
         attempt += 1
         try:
-            cls = ChatOpenAI(model=S.emotion_model, temperature=S.emotion_temperature, timeout=S.emotion_timeout_s)
+            cls = ChatOpenAI(
+                model=S.emotion_model,
+                temperature=S.emotion_temperature,
+                timeout=S.emotion_timeout_s
+            )
             msg = await cls.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
             raw = (getattr(msg, "content", "") or "").strip()
             data = json.loads(raw)
-            items = data.get("items") or []
-            if not isinstance(items, list) or len(items) != 3:
-                raise ValueError("malformed")
-            want = {"joy": "Joy", "anger": "Anger", "sadness": "Sadness"}
-            norm = {}
-            for it in items:
-                nm = str(it.get("name") or "").lower().strip()
-                iv = int(it.get("intensity", 1))
-                iv = 1 if iv < 1 or iv > 3 else iv
-                proper = want.get(nm)
-                if not proper:
-                    raise ValueError("bad name")
-                norm[proper] = {"name": proper, "intensity": iv}
-            return {"items": [norm.get("Joy", {"name":"Joy","intensity":1}),
-                              norm.get("Anger", {"name":"Anger","intensity":1}),
-                              norm.get("Sadness", {"name":"Sadness","intensity":1})]}
+            return _normalize_one(data)
         except Exception:
             if attempt <= S.emotion_retries:
                 continue
             break
-    return {"items": [
-        {"name": "Joy", "intensity": 1},
-        {"name": "Anger", "intensity": 1},
-        {"name": "Sadness", "intensity": 1},
-    ]}
+    return {"items": [{"name": "Joy", "intensity": 1}]}
 
 # =============================================================================
 # Run both streams in parallel

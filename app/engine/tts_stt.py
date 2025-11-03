@@ -6,8 +6,7 @@ import os
 import logging
 from io import BytesIO
 from time import perf_counter
-from typing import Optional, List, Tuple, Callable, Awaitable
-
+from typing import Optional, List, Tuple, Callable, Awaitable, Any, Dict
 from pydub import AudioSegment
 
 log = logging.getLogger(__name__)
@@ -32,6 +31,7 @@ MP3_BITRATE = "192k"
 DO_NORMALIZE = True            # set False to skip normalization globally
 TARGET_DBFS = -1.0             # peak normalization target
 ARKIT_DIM = 15
+VIS_FPS = int(os.getenv("VIS_FPS", "100"))
 
 def _normalize_mp3(audio_bytes: bytes) -> bytes:
     if not DO_NORMALIZE:
@@ -50,11 +50,11 @@ def _mp3_duration_ms(audio_bytes: bytes, fallback_ms: int) -> int:
     except Exception:
         return fallback_ms
 
-def _visemes(text: str, duration_ms: int) -> List[List[float]]:
+def _visemes(text: str, duration_ms: int, fps: int = VIS_FPS) -> List[List[float]]:
     # ultra-compact ARKit-ish approximation
     if duration_ms <= 0:
         duration_ms = 300
-    frames = max(1, duration_ms // 100)  # ~10 fps
+    frames = max(1, int(round(duration_ms * (fps / 1000.0))))
     t = (text or "").lower()
     vowels, labials = set("aeiou"), set("mbp")
 
