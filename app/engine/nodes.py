@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import time
+import re
 from dataclasses import dataclass
 from typing import TypedDict, List, Dict, Any, Optional, Tuple
 
@@ -54,6 +55,29 @@ DB_PRIMARY = os.getenv("DB_PRIMARY_ALIAS", "default")
 
 
 # =============================================================================
+# Slide intent (deterministic triggers)
+# =============================================================================
+_SLIDE_WRITE_TRIGGER = re.compile(
+    r"\b(create|make|generate|draft|prepare|build|update|revise|edit|modify|add|convert|turn)\b"
+    r".{0,40}\b(slide|slides|deck|presentation|ppt|pptx)\b",
+    re.IGNORECASE,
+)
+
+_SLIDE_READ_TRIGGER = re.compile(
+    r"\b(show|view|see|display|open|fetch|load|share)\b"
+    r".{0,40}\b(slide|slides|deck|presentation|ppt|pptx)\b"
+    r"|(?:\blatest\b|\bcurrent\b|\bwhat changed\b|\brecent changes\b|\bupdate status\b|\bdiff\b|\bcompare\b)",
+    re.IGNORECASE,
+)
+
+def _wants_slide_write(text: str) -> bool:
+    return bool(_SLIDE_WRITE_TRIGGER.search((text or "")))
+
+def _wants_slide_read(text: str) -> bool:
+    return bool(_SLIDE_READ_TRIGGER.search((text or "")))
+
+
+# =============================================================================
 # State
 # =============================================================================
 class QAState(TypedDict, total=False):
@@ -80,6 +104,10 @@ class QAState(TypedDict, total=False):
     slides_tool_used: bool
     slides_not_found: bool
     slides_write_persisted: bool
+
+    # Deterministic intent flags (NEW)
+    must_write_intent: bool
+    must_read_intent: bool
 
     response: str
 
@@ -328,6 +356,11 @@ async def n_prepare(state: QAState) -> QAState:
     state["base_msgs"] = base_msgs
     state["user_msg"] = HumanMessage(content=(state.get("query") or "").strip())
 
+    # Deterministic intent flags (NEW)
+    user_text = state["user_msg"].content
+    state["must_write_intent"] = _wants_slide_write(user_text)
+    state["must_read_intent"] = _wants_slide_read(user_text)
+
     state["slides_latest"] = {}
     state["slides_tool_used"] = False
     state["slides_not_found"] = False
@@ -366,12 +399,14 @@ async def _tool_router_and_stream(state: QAState):
         SystemMessage(content=(
             "You may call tools for THIS session.\n"
             "Tools:\n"
-            "  • fetch_latest_slides()  — READ-ONLY. Use for any request to view/check/show/summarize/compare slides,\n"
-            "    or phrases like: latest, current, what changed, recent changes, update status, diff.\n"
+            "  • fetch_latest_slides() — READ-ONLY. Use for any request to view/check/show/summarize/compare slides,\n"
+            "    or phrases like: latest, current, what changed, recent changes, update status, diff, compare.\n"
             "  • generate_or_update_slides(editorjs?, title?, summary?, ai_enrich, max_sections) — WRITE.\n"
-            "    STRICT: If the user explicitly asks to create/make/update/edit slides, you MUST call this tool.\n"
-            "    NEVER attempt to create/modify slides in assistant text. Do not output JSON.\n"
-            "    If intent is ambiguous, ask a brief clarifying question; do NOT create a deck.\n"
+            "    STRICT policy:\n"
+            "      - If the user's message contains any of these verbs with slide nouns, you MUST call this tool:\n"
+            "        create/make/generate/draft/prepare/build/update/revise/edit/modify/add/convert/turn + slide/deck/presentation/ppt.\n"
+            "      - Never attempt to create/modify slides in assistant text. Do not output JSON.\n"
+            "      - If intent is ambiguous, ask one brief clarification; do NOT create a deck.\n"
             "  • search_wikipedia(query)\n"
             "HARD RULES:\n"
             "  1) Do NOT call generate_or_update_slides unless the user explicitly asks to create or update slides.\n"
@@ -379,10 +414,14 @@ async def _tool_router_and_stream(state: QAState):
             "     Never fabricate a deck or claim an update without a successful tool write.\n"
             "  3) If the user asks for latest/current changes or to show/compare the deck, call fetch_latest_slides.\n"
             "  4) Never include slide JSON in assistant text.\n"
+            "\n"
+            "Examples:\n"
+            "User: 'Create slides on Q4 OKRs'  -> Call generate_or_update_slides\n"
+            "User: 'Update the deck with a risk section' -> Call generate_or_update_slides\n"
+            "User: 'Show me the latest deck'   -> Call fetch_latest_slides\n"
         )),
         state["user_msg"],  # intentionally exclude chat history here
     ]
-
 
     tools_schema = TOOLS_SCHEMA  # expose all tools; instruction above governs usage
     tool_calls: List[Dict[str, Any]] = []
@@ -392,6 +431,15 @@ async def _tool_router_and_stream(state: QAState):
     except Exception:
         log.exception("[nodes:tool_router] router failed")
         tool_calls = []
+
+    # NEW: deterministic fallbacks based on lexical intent
+    if not tool_calls:
+        if state.get("must_write_intent"):
+            log.info("[router:fallback] Forcing generate_or_update_slides due to write intent")
+            tool_calls = [{"name": "generate_or_update_slides", "args": {}}]
+        elif state.get("must_read_intent"):
+            log.info("[router:fallback] Forcing fetch_latest_slides due to read intent")
+            tool_calls = [{"name": "fetch_latest_slides", "args": {}}]
 
     async def _exec_call(call: Dict[str, Any]):
         name = (call.get("name") or "").strip()
@@ -461,6 +509,14 @@ async def _tool_router_and_stream(state: QAState):
     else:
         state["turn_slides_context"] = ""
 
+    # trace
+    log.info(
+        "[router:intent] must_write=%s must_read=%s tool_used=%s persisted=%s not_found=%s",
+        state.get("must_write_intent"), state.get("must_read_intent"),
+        state.get("slides_tool_used"), state.get("slides_write_persisted"),
+        state.get("slides_not_found"),
+    )
+
     # signal: slides context is finalized for this turn
     state["slides_ready_event"].set()
 
@@ -487,6 +543,22 @@ async def _stream_text_with_audio(state: QAState):
             instruction=(state["agent"].persona or "").strip(),
         ))
     ]
+
+    # NEW: Guard if user asked to WRITE slides but nothing persisted.
+    if state.get("must_write_intent") and not state.get("slides_write_persisted"):
+        msgs.append(SystemMessage(content=(
+            "Slides write was requested this turn but no deck has been saved yet.\n"
+            "Do NOT claim slides were created or updated. Do NOT output slide JSON.\n"
+            "Reply briefly: 'No changes saved yet.' Then ask for concrete inputs "
+            "(title, audience, goal, and 3–6 section headers)."
+        )))
+
+    # NEW: Guard if user asked to READ slides but none exist.
+    if state.get("must_read_intent") and not state.get("slides_latest"):
+        msgs.append(SystemMessage(content=(
+            "No slides are available for this session. State this briefly. "
+            "Offer to create a new deck if the user wants; do not invent content."
+        )))
 
     if state["slides_tool_used"]:
         # Guardrails so the model does not claim an update unless we actually persisted,
