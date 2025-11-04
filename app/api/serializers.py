@@ -40,11 +40,10 @@ class AgentReadSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 class AgentWriteSerializer(serializers.ModelSerializer):
-    user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False)
-
+    # user is NEVER accepted from clients
     class Meta:
         model = Agent
-        fields = ["user", "voice", "name", "persona", "max_tokens", "glb_url", "avatar", "is_active"]
+        fields = ["voice", "name", "persona", "max_tokens", "glb_url", "avatar", "is_active"]
         extra_kwargs = {
             "persona": {"required": False},
             "max_tokens": {"required": False},
@@ -54,50 +53,43 @@ class AgentWriteSerializer(serializers.ModelSerializer):
             "voice": {"required": False},
         }
 
-    def create(self, validated: dict[str, Any]):
-        if "user" not in validated:
-            validated["user"] = self.context["request"].user
-        return super().create(validated)
-
 # ----- Sessions -----
 class SessionReadSerializer(serializers.ModelSerializer):
     user_username = serializers.CharField(source="user.username", read_only=True)
-    agent_bot_id = serializers.UUIDField(source="agent.bot_id", read_only=True)
+    bot_id = serializers.UUIDField(source="agent.bot_id", read_only=True)
     agent_name = serializers.CharField(source="agent.name", read_only=True)
 
     class Meta:
         model = Session
         fields = [
             "id", "thread_id", "user", "user_username",
-            "agent", "agent_bot_id", "agent_name",
+            "bot_id", "agent_name",
             "title", "summary", "is_active", "created_at", "updated_at",
         ]
         read_only_fields = fields
 
 class SessionWriteSerializer(serializers.ModelSerializer):
-    # Allow referencing agent by bot_id as an alternative
-    agent_bot_id = serializers.UUIDField(write_only=True, required=False)
+    # Allow referencing agent by bot_id (renamed from agent_bot_id -> bot_id)
+    bot_id = serializers.UUIDField(write_only=True, required=False)
 
     class Meta:
         model = Session
-        fields = ["user", "agent", "agent_bot_id", "title", "summary", "is_active"]
+        fields = ["agent", "bot_id", "title", "summary", "is_active"]
         extra_kwargs = {
-            "user": {"required": False},
-            "agent": {"required": False},  # either agent or agent_bot_id
+            "agent": {"required": False},  # either agent or bot_id
             "title": {"required": False},
             "summary": {"required": False},
             "is_active": {"required": False},
         }
 
     def validate(self, attrs):
-        if not attrs.get("agent") and not attrs.get("agent_bot_id"):
-            raise serializers.ValidationError("Provide either 'agent' or 'agent_bot_id'.")
+        if not attrs.get("agent") and not attrs.get("bot_id"):
+            raise serializers.ValidationError("Provide either 'agent' or 'bot_id'.")
         return attrs
 
     def create(self, validated):
-        if "user" not in validated:
-            validated["user"] = self.context["request"].user
-        bot_id = validated.pop("agent_bot_id", None)
+        # user comes from request.user; agent may come from bot_id
+        bot_id = validated.pop("bot_id", None)
         if bot_id and not validated.get("agent"):
             from agent.models import Agent
             validated["agent"] = Agent.objects.get(bot_id=bot_id)
@@ -106,13 +98,13 @@ class SessionWriteSerializer(serializers.ModelSerializer):
 # ----- Chats -----
 class ChatReadSerializer(serializers.ModelSerializer):
     thread_id = serializers.CharField(source="session.thread_id", read_only=True)
-    agent_bot_id = serializers.UUIDField(source="session.agent.bot_id", read_only=True)
+    bot_id = serializers.UUIDField(source="session.agent.bot_id", read_only=True)
 
     class Meta:
         model = Chat
         fields = [
             "id", "session", "thread_id", "query", "response",
-            "emotion", "viseme", "meta", "created_at", "updated_at", "agent_bot_id",
+            "emotion", "viseme", "meta", "created_at", "updated_at", "bot_id",
         ]
         read_only_fields = fields
 

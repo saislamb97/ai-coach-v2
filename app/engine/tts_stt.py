@@ -7,6 +7,7 @@ import logging
 from io import BytesIO
 from time import perf_counter
 from typing import Optional, List, Tuple, Callable, Awaitable, Any, Dict
+
 from pydub import AudioSegment
 
 log = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ __all__ = [
 ]
 
 # =========================================================
-# Small, boring helpers
+# Small helpers / constants
 # =========================================================
 
 def _env(name: str, default: Optional[str] = None, *, required: bool = False) -> str:
@@ -28,77 +29,168 @@ def _env(name: str, default: Optional[str] = None, *, required: bool = False) ->
     return v
 
 MP3_BITRATE = "192k"
-DO_NORMALIZE = True            # set False to skip normalization globally
-TARGET_DBFS = -1.0             # peak normalization target
+DO_NORMALIZE = True              # set False to skip normalization globally
+TARGET_DBFS = -1.0               # peak normalization target
 ARKIT_DIM = 15
-VIS_FPS = int(os.getenv("VIS_FPS", "100"))
+VIS_FPS = int(os.getenv("VIS_FPS", "100"))  # frames per second for visemes
 
 def _normalize_mp3(audio_bytes: bytes) -> bytes:
+    """Peak-normalize MP3 (best-effort)."""
     if not DO_NORMALIZE:
         return audio_bytes
     seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
-    change = TARGET_DBFS - seg.max_dBFS
+    try:
+        change = TARGET_DBFS - seg.max_dBFS
+    except Exception:
+        # very old pydub can lack max_dBFS on silence; skip
+        return audio_bytes
     seg2 = seg.apply_gain(change) if change > 0 else seg
     out = io.BytesIO()
     seg2.export(out, format="mp3", bitrate=MP3_BITRATE)
     return out.getvalue()
 
 def _mp3_duration_ms(audio_bytes: bytes, fallback_ms: int) -> int:
+    """Get duration using pydub; fall back if parsing fails."""
     try:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
         return int(seg.duration_seconds * 1000)
     except Exception:
         return fallback_ms
 
-def _visemes(text: str, duration_ms: int, fps: int = VIS_FPS) -> List[List[float]]:
-    # ultra-compact ARKit-ish approximation
+# =========================================================
+# Viseme synthesis (ARKit-like, 15 dims, audio-driven)
+# =========================================================
+
+# ARKit-ish index mapping for a compact 15-dim mouth/tongue set
+JAW_OPEN           = 0
+MOUTH_FUNNEL       = 1
+MOUTH_CLOSE        = 2
+MOUTH_PUCKER       = 3
+MOUTH_SMILE_L      = 4
+MOUTH_SMILE_R      = 5
+MOUTH_LEFT         = 6
+MOUTH_RIGHT        = 7
+MOUTH_FROWN_L      = 8
+MOUTH_FROWN_R      = 9
+MOUTH_DIMPLE_L     = 10
+MOUTH_DIMPLE_R     = 11
+MOUTH_STRETCH_L    = 12
+MOUTH_STRETCH_R    = 13
+TONGUE_OUT         = 14
+
+_VOWELS   = set("aeiou")
+_LABIALS  = set("bmp")
+_FRIC     = set("fvszx")                # teeth/lips → stretch/press
+_ALVEOL   = set("tdlnr")                # alveolar ridge → slight stretch & jaw
+_VEL_GLOT = set("kgqh")                 # back/throat → jaw + funnel
+
+# canonical shapes per class (base weights 0..1)
+_BASE_SHAPES: Dict[str, Dict[int, float]] = {
+    "VOWEL": {JAW_OPEN: .65, MOUTH_FUNNEL: .45, MOUTH_CLOSE: .05, MOUTH_PUCKER: .15,
+              MOUTH_SMILE_L: .05, MOUTH_SMILE_R: .05},
+    "LABIAL": {MOUTH_CLOSE: .85, MOUTH_PUCKER: .55, JAW_OPEN: .10},
+    "FRIC": {MOUTH_STRETCH_L: .45, MOUTH_STRETCH_R: .45, JAW_OPEN: .20},
+    "ALV": {JAW_OPEN: .25, MOUTH_STRETCH_L: .20, MOUTH_STRETCH_R: .20, TONGUE_OUT: .10},
+    "VEL": {JAW_OPEN: .35, MOUTH_FUNNEL: .25},
+    "PAUSE": {MOUTH_CLOSE: .15},
+    "REST": {JAW_OPEN: .05, MOUTH_CLOSE: .05},
+}
+
+def _class_for_char(ch: str) -> str:
+    c = ch.lower()
+    if c in _VOWELS:   return "VOWEL"
+    if c in _LABIALS:  return "LABIAL"
+    if c in _FRIC:     return "FRIC"
+    if c in _ALVEOL:   return "ALV"
+    if c in _VEL_GLOT: return "VEL"
+    if c in ".!?":     return "PAUSE"
+    return "REST"
+
+def _rms_envelope_from_audio(audio_bytes: bytes, frames: int) -> List[float]:
+    """Compute simple 0..1 RMS per frame to drive mouth intensity."""
+    try:
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+        ms_per_frame = max(1, int(round(1000.0 / VIS_FPS)))
+        env = []
+        for i in range(frames):
+            start = i * ms_per_frame
+            chunk = seg[start:start + ms_per_frame]
+            env.append(chunk.rms or 0)
+        mx = max(env) or 1
+        return [min(1.0, e / mx) for e in env]
+    except Exception:
+        # fallback: gentle rise/fall envelope so mouth never looks “dead”
+        return [0.2 + 0.8 * (min(i, frames - 1 - i) / max(1, frames // 2)) for i in range(frames)]
+
+def _shape_for_class(cls: str, amp: float) -> List[float]:
+    out = [0.0] * ARKIT_DIM
+    base = _BASE_SHAPES.get(cls, _BASE_SHAPES["REST"])
+    for idx, val in base.items():
+        out[idx] = val * amp
+    # slight “smile” boost on strong vowels
+    if cls == "VOWEL" and amp > 0.5:
+        out[MOUTH_SMILE_L] = min(1.0, out[MOUTH_SMILE_L] + 0.04 * (amp - 0.5))
+        out[MOUTH_SMILE_R] = min(1.0, out[MOUTH_SMILE_R] + 0.04 * (amp - 0.5))
+    return out
+
+def _spread_lr(shape: List[float], amp: float, drift: float) -> None:
+    """Inject tiny L/R asymmetry to avoid robotic symmetry."""
+    shape[MOUTH_LEFT]       = 0.06 * amp * max(0.0, 1.0 - abs(drift))
+    shape[MOUTH_RIGHT]      = 0.06 * amp * max(0.0, 1.0 - abs(drift))
+    shape[MOUTH_SMILE_L]    = min(1.0, shape[MOUTH_SMILE_L] + 0.02 * amp * max(0.0, drift))
+    shape[MOUTH_SMILE_R]    = min(1.0, shape[MOUTH_SMILE_R] + 0.02 * amp * max(0.0, -drift))
+    shape[MOUTH_FROWN_L]    = min(1.0, 0.02 * amp * max(0.0, -drift))
+    shape[MOUTH_FROWN_R]    = min(1.0, 0.02 * amp * max(0.0, drift))
+    shape[MOUTH_DIMPLE_L]   = min(1.0, 0.02 * amp)
+    shape[MOUTH_DIMPLE_R]   = min(1.0, 0.02 * amp)
+
+def _smooth(prev: List[float], cur: List[float], alpha: float = 0.6) -> List[float]:
+    """Exponential smoothing between frames."""
+    return [alpha * p + (1 - alpha) * c for p, c in zip(prev, cur)]
+
+def _visemes(
+    text: str,
+    duration_ms: int,
+    audio_bytes: bytes | None = None,
+    fps: int = VIS_FPS,
+) -> List[List[float]]:
+    """
+    Return a list of frames; each frame is a 15-element array in [0..1].
+    Frames are synced to VIS_FPS and total length = duration_ms.
+    """
     if duration_ms <= 0:
         duration_ms = 300
     frames = max(1, int(round(duration_ms * (fps / 1000.0))))
-    t = (text or "").lower()
-    vowels, labials = set("aeiou"), set("mbp")
 
-    weights: List[Tuple[str, float]] = []
-    for ch in t:
-        if ch in vowels:
-            weights.append(("v", 1.0))
-        elif ch in labials:
-            weights.append(("l", 0.9))
-        elif ch.isalpha():
-            weights.append(("c", 0.5))
-        elif ch in ".!?":
-            weights.append(("p", 0.2))
-        else:
-            weights.append(("o", 0.0))
+    # Loudness envelope (0..1) to drive amplitude
+    env = _rms_envelope_from_audio(audio_bytes, frames) if audio_bytes else [0.35] * frames
 
-    span = max(1, len(weights) // frames)
+    # Very rough “phoneme” classes from characters → one class per frame
+    chars = [c for c in (text or "") if not c.isspace()]
+    span = max(1, len(chars) // frames)
+    seq = [_class_for_char(chars[i * span]) if i * span < len(chars) else "REST" for i in range(frames)]
+
     out: List[List[float]] = []
-    idx = 0
-    for f in range(frames):
-        jaw = funnel = close_ = 0.05
-        for typ, w in weights[idx: idx + span]:
-            if typ == "v":
-                jaw += 0.5 * w; funnel += 0.4 * w
-            elif typ == "l":
-                close_ += 0.6 * w
-            elif typ == "c":
-                jaw += 0.2 * w
-            elif typ == "p":
-                jaw *= 0.7; funnel *= 0.7; close_ *= 0.9
-        idx += span
-        # light envelope for smoother edges
-        attack = min(1.0, (f + 1) / 3.0)
-        release = min(1.0, (frames - f) / 3.0)
-        env = attack if attack < release else release
-        jaw = max(0.0, min(1.0, jaw * env))
-        funnel = max(0.0, min(1.0, funnel * env))
-        close_ = max(0.0, min(1.0, close_ * env))
-        frame = [0.0] * ARKIT_DIM
-        frame[0], frame[1], frame[2] = round(jaw, 3), round(funnel, 3), round(close_, 3)
-        out.append(frame)
+    prev = [0.0] * ARKIT_DIM
+    for i in range(frames):
+        cls = seq[i]
+        amp = max(0.12, env[i])  # keep a minimum so mouth never fully dies
+        cur = _shape_for_class(cls, amp)
+
+        # periodic drift for L/R
+        drift = ((i % 7) - 3) / 12.0  # ~[-0.25..0.25]
+        _spread_lr(cur, amp, drift)
+
+        # attack/release smoothing
+        cur = _smooth(prev, cur, alpha=0.6)
+        prev = cur
+
+        out.append([max(0.0, min(1.0, round(v, 3))) for v in cur])
+
     return out
 
 def _parse(service: Optional[str], voice_id: Optional[str]) -> Tuple[str, str]:
+    """Parse 'service::voice' or separate service + voice_id."""
     svc = (service or "").strip().lower()
     vid = (voice_id or "").strip()
     if not svc and "::" not in vid:
@@ -254,6 +346,8 @@ async def synthesize_tts_async(text: str, service: str | None, voice_id: str | N
     except Exception as e:
         log.warning("[TTS] normalization skipped: %s", e)
 
-    # visemes
+    # visemes: use real audio envelope to drive intensity
     dur = _mp3_duration_ms(audio, fallback_ms=max(300, int(len(text) * 40)))
-    return audio, _visemes(text, dur)
+    vis = _visemes(text, dur, audio_bytes=audio)
+
+    return audio, vis

@@ -1,10 +1,11 @@
 # api/views.py
 from __future__ import annotations
-from django.shortcuts import render, get_object_or_404
-from rest_framework import filters as drf_filters, status
+from django.shortcuts import render
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
+from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter
 
 from agent.models import Voice, Agent
@@ -22,11 +23,66 @@ from api.serializers import (
     SlidesReadSerializer, SlidesWriteSerializer,
 )
 
-# ------------------- Swagger shared params -------------------
+# ---------- Helper mixin: always return READ serializer on writes ----------
+class ReturnReadOnWriteMixin:
+    """
+    For create/update/partial_update, serialize the instance with the READ serializer
+    so clients get the full detail payload (same as GET).
+
+    IMPORTANT: we delegate to perform_create/perform_update so viewsets can
+    inject things like `user=self._resolve_auth_user()`.
+    """
+    read_serializer_class = None
+    write_serializer_class = None
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return self.write_serializer_class or super().get_serializer_class()
+        return self.read_serializer_class or super().get_serializer_class()
+
+    def _serialize_read(self, instance):
+        serializer = self.read_serializer_class(
+            instance, context=self.get_serializer_context()
+        )
+        return serializer.data
+
+    # Default hooks (views can override)
+    def perform_create(self, serializer):
+        serializer.save()
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Let the view inject user/tenant/etc.
+        self.perform_create(serializer)
+
+        instance = serializer.instance
+        headers = self.get_success_headers(serializer.data)
+        return Response(self._serialize_read(instance), status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        # Let the view customize update
+        self.perform_update(serializer)
+
+        instance = serializer.instance
+        return Response(self._serialize_read(instance), status=status.HTTP_200_OK)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+# ------------------- Swagger shared params (cleaned) -------------------
 USER_SCOPE_PARAMS = [
     OpenApiParameter(name="user_id", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to user id"),
-    OpenApiParameter(name="username", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to username"),
-    OpenApiParameter(name="email", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to email"),
 ]
 
 # ------------------- Voices -------------------
@@ -39,7 +95,7 @@ USER_SCOPE_PARAMS = [
     destroy=extend_schema(summary="Delete a voice"),
 )
 @extend_schema(tags=["Voice"])
-class VoiceViewSet(ModelViewSet):
+class VoiceViewSet(ReturnReadOnWriteMixin, ModelViewSet):
     queryset = Voice.objects.all().order_by("created_at", "pk")
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
@@ -47,8 +103,8 @@ class VoiceViewSet(ModelViewSet):
     search_fields = ["name", "service", "gender"]
     ordering_fields = ["created_at", "name"]
 
-    def get_serializer_class(self):
-        return VoiceWriteSerializer if self.action in ("create", "update", "partial_update") else VoiceReadSerializer
+    read_serializer_class = VoiceReadSerializer
+    write_serializer_class = VoiceWriteSerializer
 
 # ------------------- Agents -------------------
 @extend_schema_view(
@@ -60,8 +116,7 @@ class VoiceViewSet(ModelViewSet):
     destroy=extend_schema(summary="Delete an agent"),
 )
 @extend_schema(tags=["Agent"])
-class AgentViewSet(TenantScopedQuerysetMixin, ModelViewSet):
-    # lookup by bot_id as requested
+class AgentViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
     lookup_field = "bot_id"
     lookup_value_regex = r"[0-9a-fA-F-]{36}"
 
@@ -69,18 +124,21 @@ class AgentViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
     filterset_class = AgentFilter
-    search_fields = ["name", "persona", "user__username", "user__email", "voice__name"]
+    search_fields = ["name", "persona", "voice__name"]
     ordering_fields = ["created_at", "name", "is_active"]
-
     user_lookup_field = "user"
 
-    def get_queryset(self):
-        qs = super().get_queryset()
-        qs = self.scope_to_tenant(qs)  # default: authenticated user
-        return qs
+    read_serializer_class = AgentReadSerializer
+    write_serializer_class = AgentWriteSerializer
 
-    def get_serializer_class(self):
-        return AgentWriteSerializer if self.action in ("create", "update", "partial_update") else AgentReadSerializer
+    def get_queryset(self):
+        return self.scope_to_tenant(super().get_queryset())
+
+    def perform_create(self, serializer):
+        user = self._resolve_auth_user()
+        if not user:
+            raise ValidationError("API key is not linked to a valid user.")
+        serializer.save(user=user)
 
 # ------------------- Sessions -------------------
 @extend_schema_view(
@@ -92,7 +150,7 @@ class AgentViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     destroy=extend_schema(summary="Delete a session"),
 )
 @extend_schema(tags=["Session"])
-class SessionViewSet(TenantScopedQuerysetMixin, ModelViewSet):
+class SessionViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
     lookup_field = "thread_id"
 
     queryset = Session.objects.select_related("user", "agent").all()
@@ -100,14 +158,20 @@ class SessionViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
     filterset_class = SessionFilter
     search_fields = ["thread_id", "title", "summary", "agent__name", "agent__bot_id"]
-    ordering_fields = ["created_at", "updated_at", "title"]
+    ordering_fields = ["created_at", "updated_at"]
     user_lookup_field = "user"
+
+    read_serializer_class = SessionReadSerializer
+    write_serializer_class = SessionWriteSerializer
 
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
 
-    def get_serializer_class(self):
-        return SessionWriteSerializer if self.action in ("create", "update", "partial_update") else SessionReadSerializer
+    def perform_create(self, serializer):
+        user = self._resolve_auth_user()
+        if not user:
+            raise ValidationError("API key is not linked to a valid user.")
+        serializer.save(user=user)
 
 # ------------------- Chats -------------------
 @extend_schema_view(
@@ -119,7 +183,7 @@ class SessionViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     destroy=extend_schema(summary="Delete a chat message"),
 )
 @extend_schema(tags=["Chat"])
-class ChatViewSet(TenantScopedQuerysetMixin, ModelViewSet):
+class ChatViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
     queryset = Chat.objects.select_related("session", "session__user", "session__agent").all()
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
@@ -128,11 +192,11 @@ class ChatViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     ordering_fields = ["created_at", "id"]
     user_lookup_field = "session__user"
 
+    read_serializer_class = ChatReadSerializer
+    write_serializer_class = ChatWriteSerializer
+
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
-
-    def get_serializer_class(self):
-        return ChatWriteSerializer if self.action in ("create", "update", "partial_update") else ChatReadSerializer
 
 # ------------------- Slides -------------------
 @extend_schema_view(
@@ -144,7 +208,7 @@ class ChatViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     destroy=extend_schema(summary="Delete slides"),
 )
 @extend_schema(tags=["Slides"])
-class SlidesViewSet(TenantScopedQuerysetMixin, ModelViewSet):
+class SlidesViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
     queryset = Slides.objects.select_related("session", "session__user", "session__agent").all()
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
@@ -153,11 +217,11 @@ class SlidesViewSet(TenantScopedQuerysetMixin, ModelViewSet):
     ordering_fields = ["updated_at", "created_at"]
     user_lookup_field = "session__user"
 
+    read_serializer_class = SlidesReadSerializer
+    write_serializer_class = SlidesWriteSerializer
+
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
-
-    def get_serializer_class(self):
-        return SlidesWriteSerializer if self.action in ("create", "update", "partial_update") else SlidesReadSerializer
 
 # ------------------- Simple dev test endpoint -------------------
 def testView(request):
