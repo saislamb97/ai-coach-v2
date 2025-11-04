@@ -368,17 +368,21 @@ async def _tool_router_and_stream(state: QAState):
             "Tools:\n"
             "  • fetch_latest_slides()  — READ-ONLY. Use for any request to view/check/show/summarize/compare slides,\n"
             "    or phrases like: latest, current, what changed, recent changes, update status, diff.\n"
-            "  • generate_or_update_slides(editorjs?, title?, summary?, ai_enrich, max_sections) — WRITE. "
-            "    Call this ONLY if the user explicitly asks to create/generate/update/edit the slides.\n"
+            "  • generate_or_update_slides(editorjs?, title?, summary?, ai_enrich, max_sections) — WRITE.\n"
+            "    STRICT: If the user explicitly asks to create/make/update/edit slides, you MUST call this tool.\n"
+            "    NEVER attempt to create/modify slides in assistant text. Do not output JSON.\n"
+            "    If intent is ambiguous, ask a brief clarifying question; do NOT create a deck.\n"
             "  • search_wikipedia(query)\n"
             "HARD RULES:\n"
             "  1) Do NOT call generate_or_update_slides unless the user explicitly asks to create or update slides.\n"
-            "  2) If the user asks for latest/current changes or to show/compare the deck, call fetch_latest_slides.\n"
-            "  3) Never include slide JSON in assistant text.\n"
+            "  2) When the user explicitly asks to create/update, you MUST call generate_or_update_slides.\n"
+            "     Never fabricate a deck or claim an update without a successful tool write.\n"
+            "  3) If the user asks for latest/current changes or to show/compare the deck, call fetch_latest_slides.\n"
+            "  4) Never include slide JSON in assistant text.\n"
         )),
-
         state["user_msg"],  # intentionally exclude chat history here
     ]
+
 
     tools_schema = TOOLS_SCHEMA  # expose all tools; instruction above governs usage
     tool_calls: List[Dict[str, Any]] = []

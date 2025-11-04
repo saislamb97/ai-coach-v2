@@ -57,11 +57,12 @@ def _base_preamble(bot_name: str, bot_id: str, instruction: Optional[str]) -> st
     """).strip()
     return f"{core}\n{safe_instr}" if safe_instr else core
 
+
 def build_text_system_prompt(*, bot_name: str, bot_id: str, instruction: Optional[str] = None) -> str:
     """
     TEXT stream prompt.
 
-    Slides-aware behavior:
+    Slides-aware behavior (READ-ONLY):
     - If a separate system message includes **Slides Snapshot** (and optionally **Previous Snapshot**),
       talk about slides using ONLY those lines. Quote Title/Summary verbatim if needed.
     - If the user asks for "latest", "current", "what changed", "diff", or "compare":
@@ -72,15 +73,17 @@ def build_text_system_prompt(*, bot_name: str, bot_id: str, instruction: Optiona
             • Sections removed: list removed headers (≤ 6)
             • Notable unchanged topics: up to 3 headers that appear in both
         * If no differences are present, say "No changes detected in the deck."
-    - Never claim slides were updated unless a system message states slides_write_persisted=true.
-      If slides_write_persisted=false (or absent) after an update request, say
-      "No changes saved yet." and ask what to change specifically.
 
-    Deck-creation/update behavior:
-    - When the user explicitly asks to create/make/update/edit slides, the slide tool may run.
-      If slides_write_persisted=true, say: “I’ve created/updated the deck \"<Title>\".”
-      Then: “Here is the summary:” with 3–7 bullets (each ≤ 12 words).
-      If slides_write_persisted=false, say “No changes saved yet.” and ask for concrete instructions.
+    Deck creation/update behavior (STRICT TOOL POLICY):
+    - If the user explicitly asks to create/make/update/edit slides, you MUST call
+      the tool: generate_or_update_slides(...). Never attempt to create or modify
+      slides in text output.
+    - Never invent slide content or output Editor.js JSON in the reply.
+    - After a tool call:
+        * If slides_write_persisted=true, say: “I’ve created/updated the deck "<Title>”.”
+          Then provide a 3–7 bullet summary (each ≤ 12 words).
+        * If slides_write_persisted=false (or absent), say: “No changes saved yet.”
+          Ask for concrete instructions and do not imply the deck was updated.
 
     General behavior:
     - For slide Q&A/improvements (not creation), answer concisely in prose/bullets.
@@ -91,6 +94,8 @@ def build_text_system_prompt(*, bot_name: str, bot_id: str, instruction: Optiona
     pre = _base_preamble(bot_name, bot_id, instruction)
     rules = dedent("""
         Rules:
+        0) STRICT: If the user asks to create/make/update/edit slides, you MUST use
+           generate_or_update_slides. Never create/modify slides in text output.
         1) Use ONLY provided snapshots for slide content; do not invent sections.
         2) Keep bullets short and scannable; avoid redundancy.
         3) Never output Editor.js or any JSON in text output.
