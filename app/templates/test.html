@@ -3,12 +3,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>WS Chat — RAW Debug Console</title>
+  <title>WS Chat — 3D Debug Console (RPM + Visemes)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="shortcut icon" type="image/x-icon" href="{% static 'favicon.ico' %}" />
   <style>
+    html, body { height: 100%; }
     canvas { image-rendering: auto; }
+    .json-pre { tab-size: 2; }
+    label span.value { font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -16,12 +19,15 @@
     <!-- Header -->
     <header class="flex items-center justify-between">
       <div>
-        <h1 class="text-2xl font-semibold text-slate-900">WS Chat — RAW Debug</h1>
+        <h1 class="text-2xl font-semibold text-slate-900">WS Chat — 3D Viseme Debug</h1>
         <p class="text-slate-500 text-sm">
-          Streams from <span class="font-mono">/ws/chat/</span>. Raw lines, no beautify.
+          Streams from <span class="font-mono">/ws/chat/</span> with Ready Player Me avatar mouth driven by visemes.
         </p>
       </div>
       <div class="flex items-center gap-3">
+        <div id="emotionBadge" class="inline-flex items-center gap-2 rounded-full bg-slate-200 px-2 py-1 text-xs text-slate-700">
+          <span class="h-2 w-2 rounded-full bg-slate-400 inline-block"></span> emotion: —
+        </div>
         <div id="audioBadge" class="inline-flex items-center gap-2 rounded-full bg-slate-200 px-2 py-1 text-xs text-slate-700">
           <span class="h-2 w-2 rounded-full bg-emerald-500 inline-block"></span> audio: unmuted
         </div>
@@ -34,11 +40,11 @@
     <!-- Connect -->
     <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4">
       <div class="grid gap-3 md:grid-cols-12">
-        <div class="md:col-span-4">
+        <div class="md:col-span-3">
           <label class="text-xs font-medium text-slate-600">Agent bot_id (UUID)</label>
           <input id="botId" class="w-full rounded border border-slate-300 p-2" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
         </div>
-        <div class="md:col-span-4">
+        <div class="md:col-span-3">
           <label class="text-xs font-medium text-slate-600">Visitor thread_id</label>
           <input id="threadId" class="w-full rounded border border-slate-300 p-2" placeholder="user_0123456789abcdef">
         </div>
@@ -54,18 +60,53 @@
           <label class="text-xs font-medium text-slate-600">API Key</label>
           <input id="apiKey" class="w-full rounded border border-slate-300 p-2" placeholder="Api-Key value">
         </div>
-
+        <div class="md:col-span-2 flex items-end">
+          <button id="connectBtn" class="w-full rounded bg-blue-600 px-3 py-2 text-white hover:bg-blue-700">Connect</button>
+        </div>
         <div class="md:col-span-12 flex flex-wrap items-end gap-2 pt-1">
-          <button id="connectBtn" class="rounded bg-blue-600 px-3 py-2 text-white hover:bg-blue-700">Connect</button>
           <button id="disconnectBtn" class="rounded bg-slate-200 px-3 py-2 text-slate-800 hover:bg-slate-300" disabled>Disconnect</button>
-
           <div class="ml-2 inline-flex gap-2">
             <button id="btnToggleMute" class="rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900" disabled>Mute</button>
             <button id="btnStopAudio" class="rounded bg-rose-600 px-3 py-2 text-white hover:bg-rose-700" disabled>Stop Audio</button>
           </div>
-
           <button id="btnPing" class="ml-auto rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900" disabled>Ping</button>
         </div>
+      </div>
+    </section>
+
+    <!-- Avatar (Ready Player Me) -->
+    <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4 space-y-3">
+      <div class="grid gap-3 md:grid-cols-12">
+        <div class="md:col-span-7">
+          <label class="text-xs font-medium text-slate-600">Ready Player Me GLB URL</label>
+          <input id="glbUrl" class="w-full rounded border border-slate-300 p-2 font-mono text-xs" placeholder="https://models.readyplayer.me/.../model.glb">
+        </div>
+        <div class="md:col-span-2 flex items-end">
+          <button id="loadAvatarBtn" class="w-full rounded bg-emerald-600 px-3 py-2 text-white hover:bg-emerald-700">Load Avatar</button>
+        </div>
+        <div class="md:col-span-3 grid grid-cols-3 gap-2 items-end">
+          <div class="col-span-3">
+            <label class="text-xs font-medium text-slate-600 flex items-center justify-between">
+              <span>Viseme gain</span>
+              <span class="value" id="visemeGainVal">1.20×</span>
+            </label>
+            <input id="visemeGain" type="range" min="50" max="250" step="5" value="120" class="w-full">
+          </div>
+          <div class="col-span-3">
+            <label class="text-xs font-medium text-slate-600 flex items-center justify-between">
+              <span>Smoothing (lerp)</span>
+              <span class="value" id="visemeSmoothVal">0.20</span>
+            </label>
+            <input id="visemeSmooth" type="range" min="0" max="90" step="5" value="20" class="w-full">
+          </div>
+          <div class="col-span-3">
+            <button id="btnVisemeTest" class="w-full rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900">Test Mouth</button>
+          </div>
+        </div>
+      </div>
+      <div id="threeRoot" class="w-full h-[460px] rounded border border-slate-200 bg-slate-100 overflow-hidden"></div>
+      <div class="text-xs text-slate-600">
+        Detected morphs will be logged in <strong>Events</strong>. OVR =&nbsp;<code>viseme_*</code>. ARKit =&nbsp;<code>jawOpen/mouthFunnel/mouthPucker/mouthClose</code> (also accepts common RPM synonyms).
       </div>
     </section>
 
@@ -76,12 +117,22 @@
         <button id="sendBtn" class="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700" disabled>Send</button>
       </div>
 
-      <div class="mt-3 grid gap-3 md:grid-cols-12">
+      <div class="mt-3 grid gap-3 md:grid-cols-12 items-center">
         <div class="md:col-span-8 flex items-center gap-3">
-          <button id="micStart" class="rounded bg-emerald-600 px-3 py-2 text-white hover:bg-emerald-700" disabled>🎤 Start Rec</button>
-          <button id="micStop" class="rounded bg-amber-600 px-3 py-2 text-white hover:bg-amber-700" disabled>⏹ Stop & Send</button>
-          <div id="micStatus" class="text-xs text-slate-600">idle</div>
+          <!-- Push-to-Talk -->
+          <button id="pttButton"
+                  class="rounded bg-emerald-600 px-4 py-2 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Hold to record, release to send"
+                  disabled>🎤 Hold to Talk</button>
+
+          <!-- Permission helper (appears if mic denied) -->
+          <button id="micPermBtn"
+                  class="hidden rounded bg-amber-600 px-3 py-2 text-white hover:bg-amber-700"
+                  title="Grant microphone permission">🔒 Grant mic</button>
+
+          <div id="micStatus" class="text-xs text-slate-600">mic: idle</div>
         </div>
+
         <div class="md:col-span-4 grid grid-cols-2 items-center gap-3">
           <label class="inline-flex items-center gap-2 text-xs text-slate-700 col-span-2 sm:col-span-1">
             <input id="muteOnSend" type="checkbox" class="rounded border-slate-300 text-blue-600">
@@ -90,7 +141,7 @@
           <div class="flex items-center gap-2 justify-end col-span-2 sm:col-span-1">
             <label class="text-xs text-slate-600">Playback MIME</label>
             <select id="playbackMime" class="rounded border border-slate-300 p-1 text-sm">
-              <option>audio/mpeg</option><option>audio/ogg</option><option>audio/webm</option>
+              <option>audio/mpeg</option><option>audio/ogg</option><option selected>audio/webm</option>
               <option>audio/wav</option><option>audio/mp4</option>
             </select>
           </div>
@@ -100,43 +151,31 @@
 
     <!-- Streams -->
     <section class="grid gap-4 lg:grid-cols-3">
-      <!-- TEXT -->
       <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
         <div class="flex items-center justify-between mb-2">
-          <h2 class="text-sm font-semibold text-slate-700">Text stream</h2>
+          <h2 class="text-sm font-semibold text-slate-700">Text tokens (raw)</h2>
           <div class="flex gap-2">
             <button id="textCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
             <button id="textClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
           </div>
         </div>
-        <div class="grid grid-cols-1 gap-2">
-          <div>
-            <div class="text-xs text-slate-500 mb-1">Tokens (raw)</div>
-            <pre id="textTokens" class="h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
-          </div>
-          <div>
-            <div class="text-xs text-slate-500 mb-1">Sentences (+ emotion)</div>
-            <pre id="textSentences" class="h-60 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
-          </div>
-        </div>
+        <pre id="textTokens" class="h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
       </div>
 
-      <!-- SLIDES -->
       <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
         <div class="flex items-center justify-between mb-2">
-          <h2 class="text-sm font-semibold text-slate-700">Slides stream (raw JSON)</h2>
+          <h2 class="text-sm font-semibold text-slate-700">Slides (pretty JSON)</h2>
           <div class="flex gap-2">
             <button id="slidesCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
             <button id="slidesClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
           </div>
         </div>
-        <pre id="slidesLog" class="h-80 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre-wrap"></pre>
+        <pre id="slidesLog" class="json-pre h-80 overflow-y-auto bg-slate-50 border border-slate-200 rounded p-2 text-xs font-mono whitespace-pre"></pre>
       </div>
 
-      <!-- AUDIO -->
       <div class="rounded-2xl bg-white ring-1 ring-black/5 p-4 flex flex-col">
         <div class="flex items-center justify-between mb-2">
-          <h2 class="text-sm font-semibold text-slate-700">Audio stream (base64 + viseme)</h2>
+          <h2 class="text-sm font-semibold text-slate-700">Audio + visemes</h2>
           <div class="flex gap-2">
             <button id="audioCopy" class="rounded bg-slate-200 px-2 py-1 text-xs">Copy</button>
             <button id="audioClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
@@ -147,38 +186,6 @@
       </div>
     </section>
 
-    <!-- VISEME VISUALIZER (lightweight) -->
-    <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4 space-y-4">
-      <div class="grid gap-4 md:grid-cols-2">
-        <!-- Realtime bars + mouth -->
-        <div>
-          <div class="flex items-center justify-between mb-2">
-            <h2 class="text-sm font-semibold text-slate-700">Realtime visemes (synced to audio)</h2>
-            <div class="flex gap-2">
-              <button id="vizClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
-            </div>
-          </div>
-          <canvas id="vizCanvas" width="900" height="260" class="w-full border border-slate-200 rounded"></canvas>
-          <div id="vizInfo" class="text-xs text-slate-600 mt-2">idle</div>
-        </div>
-
-        <!-- Heatmap timeline -->
-        <div>
-          <div class="flex items-center justify-between mb-2">
-            <h2 class="text-sm font-semibold text-slate-700">Viseme timeline (all frames)</h2>
-            <div class="flex gap-2">
-              <button id="tlClear" class="rounded bg-slate-200 px-2 py-1 text-xs">Clear</button>
-            </div>
-          </div>
-          <canvas id="vizTimeline" width="900" height="260" class="w-full border border-slate-200 rounded"></canvas>
-          <div class="text-xs text-slate-600 mt-2">
-            Rows = 15 visemes (v0…v14), Columns = frames, brightness = intensity.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- EVENTS -->
     <section class="rounded-2xl bg-white ring-1 ring-black/5 p-4">
       <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-semibold text-slate-700">Events</h2>
@@ -191,12 +198,26 @@
     </section>
   </div>
 
+  <!-- Import map for Three ESM -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.159.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.159.0/examples/jsm/"
+    }
+  }
+  </script>
+
   <!-- APP SCRIPT (ESM) -->
   <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
     // ---------- helpers ----------
     const $ = (s) => document.querySelector(s);
     const now = () => new Date().toLocaleTimeString();
-    const logLine = (el, line) => { el.textContent += (el.textContent ? "\\n" : "") + line; el.scrollTop = el.scrollHeight; };
+    const logLine = (el, line) => { el.textContent += (el.textContent ? "\n" : "") + line; el.scrollTop = el.scrollHeight; };
     const copyText = (el) => navigator.clipboard.writeText(el.textContent || "");
     const clearEl = (el) => el.textContent = "";
 
@@ -228,17 +249,19 @@
       return new Blob([buf], { type: outMime });
     }
 
-    function formatEmotion(e) {
-      try {
-        if (!e || typeof e !== 'object') return '';
-        const arr = Array.isArray(e.items) ? e.items : [];
-        if (!arr.length) return '';
-        const it = arr[0] || {};
-        const name = String(it.name || '').trim();
-        const v = Math.max(1, Math.min(3, parseInt(it.intensity ?? 1, 10)));
-        if (!name) return '';
-        return ` [Emotion ${name}:${v}]`;
-      } catch { return ''; }
+    // Emotion badge
+    function setEmotionBadge(name, intensity) {
+      const el = $('#emotionBadge');
+      const label = name ? `${name}` : '—';
+      const dots = { joy:'bg-amber-400', anger:'bg-rose-500', sadness:'bg-blue-500', fear:'bg-purple-500', surprise:'bg-emerald-500' };
+      const dot = dots[(name||'').toLowerCase()] || 'bg-slate-400';
+      const strong = Math.max(1, Math.min(3, Number(intensity ?? 1)));
+      el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> emotion: ${label} (${strong})`;
+      el.classList.remove('bg-amber-100','bg-rose-100','bg-blue-100','bg-emerald-100');
+      if ((name||'').toLowerCase()==='joy') el.classList.add('bg-amber-100');
+      if ((name||'').toLowerCase()==='anger') el.classList.add('bg-rose-100');
+      if ((name||'').toLowerCase()==='sadness') el.classList.add('bg-blue-100');
+      if ((name||'').toLowerCase()==='surprise') el.classList.add('bg-emerald-100');
     }
 
     // ---------- WS ----------
@@ -276,24 +299,397 @@
       document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax`;
     }
 
+    // ---------- Three.js scene ----------
+    let scene, camera, renderer, controls, avatarRoot = null;
+    let visemeTargets = []; // { mesh, dict, influences, ovr: map idx->morphIndex }
+    let arkitTargets = [];  // { mesh, dict, influences, a: {jawOpen,…} }
+    const threeRoot = $('#threeRoot');
+
+    function initThree() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf8fafc);
+
+      const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
+      camera = new THREE.PerspectiveCamera(35, w/h, 0.1, 100);
+      camera.position.set(0, 1.55, 2.2);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(w, h);
+      threeRoot.innerHTML = '';
+      threeRoot.appendChild(renderer.domElement);
+
+      // lights
+      const key = new THREE.DirectionalLight(0xffffff, 1.0);
+      key.position.set(1, 1.8, 2.5);
+      scene.add(key);
+      const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+      fill.position.set(-2, 1.2, 0.6);
+      scene.add(fill);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 1.5, 0);
+      controls.enableDamping = true;
+
+      window.addEventListener('resize', onResize);
+      tick();
+    }
+
+    function onResize() {
+      if (!renderer || !camera) return;
+      const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
+      camera.aspect = w/h; camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+
+    function tick(){
+      requestAnimationFrame(tick);
+      controls?.update();
+      renderer?.render(scene, camera);
+    }
+
+    function clearAvatar() {
+      if (avatarRoot) {
+        scene.remove(avatarRoot);
+        avatarRoot.traverse(n => {
+          if (n.isMesh) {
+            n.geometry?.dispose?.();
+            if (Array.isArray(n.material)) n.material.forEach(m=>m.dispose?.());
+            else n.material?.dispose?.();
+          }
+        });
+        avatarRoot = null;
+      }
+      visemeTargets = [];
+      arkitTargets = [];
+    }
+
+    function loadAvatar(glbUrl) {
+      clearAvatar();
+      const loader = new GLTFLoader().setCrossOrigin('anonymous');
+      loader.load(glbUrl, (gltf) => {
+        avatarRoot = gltf.scene || gltf.scenes?.[0];
+        scene.add(avatarRoot);
+        avatarRoot.scale.set(1,1,1);
+
+        controls.target.set(0, 1.55, 0);
+        camera.position.set(0, 1.55, 2.1);
+
+        scanBlendshapes(avatarRoot);
+        reportBlendshapes();
+
+        if (!visemeTargets.length && !arkitTargets.length) {
+          logLine($('#evtLog'), `[${now()}] ⚠️ No compatible morph targets were found on this model.`);
+        } else {
+          logLine($('#evtLog'), `[${now()}] avatar loaded; OVR=${visemeTargets.length>0} ARKit=${arkitTargets.length>0}`);
+        }
+      }, undefined, (err) => {
+        logLine($('#evtLog'), `[${now()}] avatar load error: ${err?.message || err}`);
+      });
+    }
+
+    // OVR names with a few common case variants
+    const OVR_SYNONYMS = {
+      0:  ['viseme_sil'],
+      1:  ['viseme_PP'],
+      2:  ['viseme_FF'],
+      3:  ['viseme_TH'],
+      4:  ['viseme_DD'],
+      5:  ['viseme_kk','viseme_KK'],
+      6:  ['viseme_CH'],
+      7:  ['viseme_SS'],
+      8:  ['viseme_nn','viseme_NN'],
+      9:  ['viseme_RR'],
+      10: ['viseme_aa','viseme_AA'],
+      11: ['viseme_E'],
+      12: ['viseme_I'],
+      13: ['viseme_O'],
+      14: ['viseme_U'],
+    };
+
+    // ARKit primary + common RPM synonyms
+    const ARKIT_CANON = [
+      'jawOpen','mouthClose','mouthFunnel','mouthPucker',
+      'mouthSmileLeft','mouthSmileRight','mouthFrownLeft','mouthFrownRight',
+      'mouthDimpleLeft','mouthDimpleRight','mouthStretchLeft','mouthStretchRight',
+      'tongueOut'
+    ];
+    const ARKIT_SYNONYMS = {
+      jawOpen:        ['jawOpen','mouthOpen'],
+      mouthClose:     ['mouthClose'],
+      mouthFunnel:    ['mouthFunnel','lipsFunnel'],
+      mouthPucker:    ['mouthPucker','lipsPucker'],
+      mouthSmileLeft: ['mouthSmileLeft','mouthSmile'],
+      mouthSmileRight:['mouthSmileRight'],
+      mouthFrownLeft: ['mouthFrownLeft'],
+      mouthFrownRight:['mouthFrownRight'],
+      mouthDimpleLeft:['mouthDimpleLeft'],
+      mouthDimpleRight:['mouthDimpleRight'],
+      mouthStretchLeft:['mouthStretchLeft'],
+      mouthStretchRight:['mouthStretchRight'],
+      tongueOut:      ['tongueOut']
+    };
+
+    function scanBlendshapes(root) {
+      visemeTargets = [];
+      arkitTargets = [];
+      root.traverse(obj => {
+        if (!obj.isMesh || !obj.morphTargetDictionary || !obj.morphTargetInfluences) return;
+
+        const dict = obj.morphTargetDictionary;
+
+        // OVR visemes
+        const ovr = {};
+        let hasOVR = false;
+        for (let i=0;i<15;i++){
+          const names = OVR_SYNONYMS[i] || [];
+          for (const n of names) {
+            if (dict[n] != null) { ovr[i] = dict[n]; hasOVR = true; break; }
+          }
+        }
+        if (hasOVR) {
+          visemeTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, ovr });
+        }
+
+        // ARKit (with synonyms)
+        const a = {};
+        let hasARK = false;
+        for (const key of ARKIT_CANON) {
+          for (const name of ARKIT_SYNONYMS[key]) {
+            if (dict[name] != null) { a[key] = dict[name]; hasARK = true; break; }
+          }
+        }
+        if (hasARK) {
+          arkitTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, a });
+        }
+      });
+    }
+
+    function reportBlendshapes() {
+      const namesFound = new Set();
+      for (const t of visemeTargets) {
+        for (const [name] of Object.entries(t.dict)) if (name.startsWith('viseme_')) namesFound.add(name);
+      }
+      const aFound = new Set();
+      for (const t of arkitTargets) {
+        for (const [k, arr] of Object.entries(ARKIT_SYNONYMS)) {
+          for (const n of arr) if (t.dict[n] != null) aFound.add(n);
+        }
+      }
+      logLine($('#evtLog'), `[${now()}] OVR morphs: ${namesFound.size ? Array.from(namesFound).sort().join(', ') : 'none'}`);
+      logLine($('#evtLog'), `[${now()}] ARKit morphs: ${aFound.size ? Array.from(aFound).sort().join(', ') : 'none'}`);
+    }
+
+    // ----- ARKit<->OVR conversion helpers -----
+    function arkitToOvr(out) {
+      const ovr = new Array(15).fill(0);
+      ovr[0]  = Math.max(0, 1 - out[0]);      // sil ~ inverse jaw
+      ovr[1]  = out[2];                        // PP ~ mouthClose
+      ovr[2]  = out[12];                       // FF ~ mouthStretch
+      ovr[3]  = 0.5*(out[12]+out[13]);         // TH ~ stretch mix
+      ovr[4]  = 0.4*out[2] + 0.6*out[8];       // DD ~ close+frown
+      ovr[5]  = 0.4*out[0] + 0.2*out[1];       // kk ~ open+funnel
+      ovr[6]  = 0.6*out[1] + 0.4*out[3];       // CH ~ funnel+pucker
+      ovr[7]  = out[12];                       // SS ~ stretch
+      ovr[8]  = 0.2*out[2];                    // nn ~ slight close
+      ovr[9]  = 0.3*out[1];                    // RR ~ funnelish
+      ovr[10] = out[0];                        // aa ~ jawOpen
+      ovr[11] = 0.4*out[12] + 0.2*out[0];      // E
+      ovr[12] = 0.6*out[12] + 0.2*out[0];      // I
+      ovr[13] = 0.8*out[1] + 0.6*out[3];       // O ~ funnel+pucker
+      ovr[14] = 0.9*out[3];                    // U ~ pucker
+      return ovr.map(v => Math.max(0, Math.min(1, v)));
+    }
+    function ovrToArkit(vals) {
+      const out = new Array(15).fill(0);
+      out[0]  = vals[10];                      // jawOpen ~ aa
+      out[1]  = Math.max(vals[13], vals[14]);  // mouthFunnel ~ O/U
+      out[2]  = vals[1];                       // mouthClose ~ PP
+      out[3]  = vals[14];                      // mouthPucker ~ U
+      out[12] = Math.max(vals[2], vals[7]);    // stretch
+      out[13] = vals[7];
+      out[4]  = 0.5*vals[10];                  // smile L/R from vowels
+      out[5]  = 0.5*vals[10];
+      return out.map(v => Math.max(0, Math.min(1, v)));
+    }
+
+    // UI gain + smoothing
+    const gainEl = $('#visemeGain');
+    const gainVal = $('#visemeGainVal');
+    const smoothEl = $('#visemeSmooth');
+    const smoothVal = $('#visemeSmoothVal');
+
+    function getGain() { return (Number(gainEl.value || 100) / 100); }
+    function getSmooth() { return (Number(smoothEl.value || 0) / 100); }
+    gainEl.oninput = () => gainVal.textContent = `${getGain().toFixed(2)}×`;
+    smoothEl.oninput = () => smoothVal.textContent = `${getSmooth().toFixed(2)}`;
+
+    function resetMorphs() {
+      const zero = new Array(15).fill(0);
+      prevFrame = zero.slice();
+      // ARKit
+      for (const t of arkitTargets) {
+        const d = t.a, inf = t.influences;
+        if (d.jawOpen      != null) inf[d.jawOpen]      = 0;
+        if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = 0;
+        if (d.mouthClose   != null) inf[d.mouthClose]   = 0;
+        if (d.mouthPucker  != null) inf[d.mouthPucker]  = 0;
+        const more = ["mouthSmileLeft","mouthSmileRight","mouthFrownLeft","mouthFrownRight","mouthDimpleLeft","mouthDimpleRight","mouthStretchLeft","mouthStretchRight","tongueOut"];
+        for (const name of more) {
+          const k = t.dict[name];
+          if (k != null) t.influences[k] = 0;
+        }
+      }
+      // OVR
+      for (const t of visemeTargets) {
+        const inf = t.influences;
+        for (let i=0;i<15;i++) {
+          const idx = t.ovr[i];
+          if (idx != null) inf[idx] = 0;
+        }
+      }
+    }
+
+    let prevFrame = new Array(15).fill(0);
+    function applyVisemeFrame(frame, fmt='arkit15') {
+      const f = Array.isArray(frame) ? frame.slice(0,15) : [];
+      // pre-scale + smooth
+      const out = new Array(15).fill(0);
+      const g = getGain();
+      const s = getSmooth();
+      for (let i=0;i<15;i++){
+        const target = Math.max(0, Math.min(1, Number(f[i] ?? 0)));
+        const sm = prevFrame[i] + (target - prevFrame[i]) * (1 - s); // low-pass
+        out[i] = Math.max(0, Math.min(1, sm * g));
+      }
+      prevFrame = out;
+
+      // If we have ARKit morphs and fmt is ARKit => drive directly
+      if (fmt === 'arkit15' && arkitTargets.length) {
+        for (const t of arkitTargets) {
+          const d = t.a, inf = t.influences;
+          if (d.jawOpen      != null) inf[d.jawOpen]      = out[0];
+          if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = out[1];
+          if (d.mouthClose   != null) inf[d.mouthClose]   = out[2];
+          if (d.mouthPucker  != null) inf[d.mouthPucker]  = out[3];
+          const more = [
+            ["mouthSmileLeft",4],["mouthSmileRight",5],["mouthFrownLeft",8],["mouthFrownRight",9],
+            ["mouthDimpleLeft",10],["mouthDimpleRight",11],["mouthStretchLeft",12],["mouthStretchRight",13],
+            ["tongueOut",14],
+          ];
+          for (const [name, idx] of more) {
+            const k = t.dict[name];
+            if (k != null) inf[k] = out[idx];
+          }
+        }
+        return;
+      }
+
+      // If fmt is ARKit but only OVR exists -> convert
+      if (fmt === 'arkit15' && visemeTargets.length && !arkitTargets.length) {
+        const vals = arkitToOvr(out);
+        for (const t of visemeTargets) {
+          const inf = t.influences;
+          for (let i=0;i<15;i++) {
+            const idx = t.ovr[i];
+            if (idx != null) inf[idx] = vals[i];
+          }
+        }
+        return;
+      }
+
+      // fmt is OVR and we have OVR -> drive directly
+      if (fmt === 'ovr15' && visemeTargets.length) {
+        for (const t of visemeTargets) {
+          const inf = t.influences;
+          for (let i=0;i<15;i++) {
+            const idx = t.ovr[i];
+            if (idx != null) inf[idx] = out[i];
+          }
+        }
+        return;
+      }
+
+      // fmt is OVR but only ARKit exists -> convert
+      if (fmt === 'ovr15' && arkitTargets.length && !visemeTargets.length) {
+        const vals = ovrToArkit(out);
+        for (const t of arkitTargets) {
+          const d = t.a, inf = t.influences;
+          if (d.jawOpen      != null) inf[d.jawOpen]      = vals[0];
+          if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = vals[1];
+          if (d.mouthClose   != null) inf[d.mouthClose]   = vals[2];
+          if (d.mouthPucker  != null) inf[d.mouthPucker]  = vals[3];
+        }
+      }
+    }
+
     // ---------- audio queue + viseme sync ----------
     const audioEl = $('#audioPlayer');
-
-    /** Each queue item: { url: string, visemes: number[][] } */
     const audioQ = [];
     let playing = false;
+    let activeFrames = [];  // [[15]]
+    let activeTimes = null; // [seconds] or null
+    let activeFmt = 'arkit15';
+    let activeUrl = null;
+    let visemeRAF = null;
 
-    // Visualizer globals
-    const vizCanvas = $('#vizCanvas');
-    const vizCtx = vizCanvas.getContext('2d');
-    const vizInfo = $('#vizInfo');
+    function lerpFrame(a, b, t) {
+      const out = new Array(15).fill(0);
+      const tt = Math.max(0, Math.min(1, t));
+      for (let i=0;i<15;i++) {
+        const av = Number(a?.[i] ?? 0);
+        const bv = Number(b?.[i] ?? 0);
+        out[i] = av + (bv - av) * tt;
+      }
+      return out;
+    }
 
-    const tlCanvas = $('#vizTimeline');
-    const tlCtx = tlCanvas.getContext('2d');
+    function startVisemeLoop(){
+      stopVisemeLoop();
+      let lastIdx = 0;
+      const step = () => {
+        if (!activeFrames.length || !isFinite(audioEl.duration) || audioEl.duration <= 0) {
+          visemeRAF = requestAnimationFrame(step);
+          return;
+        }
 
-    let vizRAF = null;
-    let activeVisemes = [];        // frames for the currently playing audio
-    let activeUrl = null;          // for cleanup checks
+        const t = audioEl.currentTime;
+
+        if (activeTimes && activeTimes.length === activeFrames.length) {
+          // time-based with interpolation
+          const times = activeTimes;
+          // clamp
+          if (t <= times[0]) {
+            applyVisemeFrame(activeFrames[0], activeFmt);
+          } else if (t >= times[times.length - 1]) {
+            applyVisemeFrame(activeFrames[activeFrames.length - 1], activeFmt);
+          } else {
+            // advance pointer
+            while (lastIdx < times.length - 2 && t >= times[lastIdx + 1]) lastIdx++;
+            const t0 = times[lastIdx];
+            const t1 = times[lastIdx + 1];
+            const f0 = activeFrames[lastIdx];
+            const f1 = activeFrames[lastIdx + 1];
+            const alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0;
+            applyVisemeFrame(lerpFrame(f0, f1, alpha), activeFmt);
+          }
+        } else {
+          // fallback: map by fraction (kept as a last resort)
+          const frac = Math.min(0.9999, Math.max(0, t / audioEl.duration));
+          const idx = Math.floor(frac * activeFrames.length);
+          applyVisemeFrame(activeFrames[idx] || activeFrames[activeFrames.length-1], activeFmt);
+        }
+
+        visemeRAF = requestAnimationFrame(step);
+      };
+      visemeRAF = requestAnimationFrame(step);
+    }
+    function stopVisemeLoop(){
+      if (visemeRAF) cancelAnimationFrame(visemeRAF);
+      visemeRAF = null;
+    }
 
     function clearAudioQueue() {
       try { audioEl.pause(); } catch {}
@@ -304,18 +700,36 @@
         if (item?.url) { try { URL.revokeObjectURL(item.url); } catch {} }
       }
       playing = false;
-      stopVisualizer();
-      clearCanvas();
-      clearTimeline();
+      activeFrames = [];
+      activeTimes = null;
+      activeUrl = null;
+      activeFmt = 'arkit15';
+      stopVisemeLoop();
+      resetMorphs();
     }
 
-    function queueAudio(b64, visemes, info='') {
+    function queueAudio(b64, framesSpec, fmt='arkit15', info='') {
       try {
         const mime = $('#playbackMime').value;
         const blob = b64ToBlob(b64, mime);
         const url = URL.createObjectURL(blob);
-        audioQ.push({ url, visemes: Array.isArray(visemes) ? visemes : [] });
-        logLine($('#audioLog'), `[${now()}] queued (${mime}) ${info}`);
+
+        // framesSpec can be array (frames) OR {frames, times?, fps?}
+        let frames = [];
+        let times = null;
+        if (Array.isArray(framesSpec)) {
+          frames = framesSpec;
+        } else if (framesSpec && typeof framesSpec === 'object') {
+          frames = Array.isArray(framesSpec.frames) ? framesSpec.frames : [];
+          if (Array.isArray(framesSpec.times)) times = framesSpec.times.map(Number);
+          const fps = Number(framesSpec.fps || framesSpec.viseme_fps || 0);
+          if (!times && fps > 0 && frames.length) {
+            times = frames.map((_, i) => i / fps);
+          }
+        }
+
+        audioQ.push({ url, frames, times, fmt });
+        logLine($('#audioLog'), `[${now()}] queued (${mime}) fmt=${fmt} frames=${frames.length} ${info}`);
         playNext();
       } catch (e) {
         logLine($('#audioLog'), `[${now()}] ! queue error: ${e}`);
@@ -327,179 +741,71 @@
       playing = true;
 
       const item = audioQ.shift();
-      activeVisemes = item.visemes || [];
+      activeFrames = item.frames || [];
+      activeTimes = Array.isArray(item.times) ? item.times : null;
       activeUrl = item.url;
+      activeFmt = item.fmt || 'arkit15';
 
-      // draw full timeline once when the audio item is set
-      drawTimelineHeatmap(activeVisemes);
-
-      audioEl.src = item.url;
-      audioEl.onended = audioEl.onerror = () => {
-        try { if (activeUrl) URL.revokeObjectURL(activeUrl); } catch {}
-        playing = false;
-        stopVisualizer();
-        clearCanvas();
-        playNext();
-      };
-
-      audioEl.onplay = () => startVisualizer();
-      audioEl.onpause = () => stopVisualizer();
-      audioEl.play().catch(err => {
-        logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
-        playing = false;
-      });
-    }
-
-    // ---------- Viseme visualizer (bars + mouth) ----------
-    const VISEME_LABELS = [...Array(15)].map((_,i)=>`v${i}`);
-
-    function clearCanvas(){
-      vizCtx.clearRect(0,0,vizCanvas.width, vizCanvas.height);
-      vizInfo.textContent = 'idle';
-    }
-    $('#vizClear').onclick = () => { stopVisualizer(); clearCanvas(); };
-
-    function drawBars(frame){
-      const w = vizCanvas.width, h = vizCanvas.height;
-      const cols = 5, rows = 3;
-      const cellW = Math.floor((w - 340) / cols); // leave room for the mouth on the right
-      const cellH = Math.floor((h - 24) / rows);
-      const pad = 10;
-      vizCtx.font = "11px ui-monospace, monospace";
-
-      for (let i=0;i<15;i++){
-        const r = Math.floor(i / cols);
-        const c = i % cols;
-        const x = pad + c*cellW;
-        const y = 20 + r*cellH;
-        const barW = cellW - pad*2;
-        const barH = cellH - 30;
-
-        const v = Math.max(0, Math.min(1, Number(frame[i] ?? 0)));
-        vizCtx.fillStyle = "#e2e8f0";
-        vizCtx.fillRect(x, y, barW, barH);
-        vizCtx.fillStyle = "#334155";
-        vizCtx.fillRect(x, y + (barH*(1 - v)), barW, barH*v);
-        vizCtx.fillStyle = "#0f172a";
-        vizCtx.fillText(`${VISEME_LABELS[i]}=${v.toFixed(3)}`, x, y + barH + 14);
-      }
-    }
-
-    function drawMouth(frame){
-      const [jaw=0, funnel=0, close=0] = frame;
-      const w = vizCanvas.width, h = vizCanvas.height;
-      const cx = w - 150, cy = Math.floor(h/2);
-
-      const open = jaw * 40;
-      const round = funnel * 40;
-      const rx = Math.max(10, 70 - round*0.9);
-      const ry = Math.max(4, open * (1 - close) + 6);
-
-      vizCtx.strokeStyle = "#0f172a"; vizCtx.lineWidth = 3;
-      vizCtx.beginPath();
-      vizCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
-      vizCtx.stroke();
-
-      if (close > 0.05){
-        vizCtx.strokeStyle = "#dc2626"; vizCtx.lineWidth = 2;
-        vizCtx.beginPath();
-        vizCtx.moveTo(cx - rx, cy);
-        vizCtx.lineTo(cx + rx, cy);
-        vizCtx.stroke();
-      }
-
-      vizCtx.font = "12px ui-monospace, monospace";
-      vizCtx.fillStyle = "#0f172a";
-      vizCtx.fillText(`jaw:${jaw.toFixed(3)} funnel:${funnel.toFixed(3)} close:${close.toFixed(3)}`, cx-120, cy + ry + 22);
-    }
-
-    function drawFrame(frame, idx, total, dur){
-      vizCtx.clearRect(0,0,vizCanvas.width, vizCanvas.height);
-      drawBars(frame);
-      drawMouth(frame);
-      vizInfo.textContent = `frame ${idx+1}/${total} • duration≈${dur ? dur.toFixed(2) : '…'}s`;
-    }
-
-    function startVisualizer(){
-      stopVisualizer();
-      const frames = Array.isArray(activeVisemes) ? activeVisemes : [];
-      if (!frames.length) return;
-
-      const step = () => {
-        if (!frames.length) { vizRAF = null; return; }
-        const dur = isFinite(audioEl.duration) ? audioEl.duration : 0;
-        const t = Math.max(0, audioEl.currentTime || 0);
-        let idx = 0;
-
-        if (dur > 0) {
-          const frac = Math.min(0.9999, t / dur);
-          idx = Math.floor(frac * frames.length);
-        } else idx = 0;
-
-        const frame = frames[idx] || frames[frames.length - 1];
-        drawFrame(frame, idx, frames.length, dur);
-        vizRAF = requestAnimationFrame(step);
-      };
-      vizRAF = requestAnimationFrame(step);
-    }
-
-    function stopVisualizer(){
-      if (vizRAF){ cancelAnimationFrame(vizRAF); vizRAF = null; }
-    }
-
-    // ---------- Timeline heatmap ----------
-    function clearTimeline(){
-      tlCtx.clearRect(0,0,tlCanvas.width, tlCanvas.height);
-    }
-    $('#tlClear').onclick = clearTimeline;
-
-    function drawTimelineHeatmap(visemes){
-      clearTimeline();
-      if (!Array.isArray(visemes) || !visemes.length) return;
-
-      const rows = 15;
-      const cols = visemes.length;
-      const pad = 6;
-      const w = tlCanvas.width - pad*2;
-      const h = tlCanvas.height - pad*2;
-      const cellW = Math.max(1, Math.floor(w / cols));
-      const cellH = Math.max(1, Math.floor(h / rows));
-
-      for (let c = 0; c < cols; c++){
-        const frame = Array.isArray(visemes[c]) ? visemes[c] : [];
-        for (let r = 0; r < rows; r++){
-          const v = Math.max(0, Math.min(1, Number(frame[r] ?? 0)));
-          const g = Math.floor(255 * (1 - v));
-          tlCtx.fillStyle = `rgb(${g},${g},${g})`; // darker = stronger
-          tlCtx.fillRect(pad + c*cellW, pad + r*cellH, cellW, cellH);
+      // Ensure zero start/end padding if backend didn’t send it
+      if (activeFrames.length) {
+        const isZero = (f) => !f || f.every(v => Number(v||0) === 0);
+        if (!isZero(activeFrames[0])) activeFrames = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], ...activeFrames];
+        if (!isZero(activeFrames[activeFrames.length-1])) activeFrames = [...activeFrames, [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]];
+        if (activeTimes && activeTimes.length === (activeFrames.length - 2)) {
+          // If we padded frames but not times, extend times a hair at both ends
+          const head = Math.max(0, activeTimes[0] - 0.02);
+          const tail = activeTimes[activeTimes.length - 1] + 0.02;
+          activeTimes = [head, ...activeTimes, tail];
         }
       }
 
-      // axis labels (left)
-      tlCtx.fillStyle = "#0f172a";
-      tlCtx.font = "10px ui-monospace, monospace";
-      for (let r = 0; r < rows; r++){
-        tlCtx.fillText(`v${r}`, 2, pad + r*cellH + 8);
-      }
+      audioEl.src = item.url;
+      audioEl.onloadedmetadata = () => {
+        if (!activeTimes && activeFrames.length && isFinite(audioEl.duration) && audioEl.duration > 0) {
+          // last-resort: spread frames across actual audio duration
+          const dur = audioEl.duration;
+          activeTimes = activeFrames.map((_, i) => (i / Math.max(1, activeFrames.length - 1)) * dur);
+        }
+        const effFps = (activeTimes && activeTimes.length > 1)
+          ? (activeTimes.length - 1) / (activeTimes[activeTimes.length - 1] - activeTimes[0])
+          : (activeFrames.length / Math.max(0.001, audioEl.duration));
+        logLine($('#audioLog'), `[${now()}] ▶ playing dur=${audioEl.duration.toFixed(2)}s ~${effFps.toFixed(1)} fps fmt=${activeFmt}`);
+      };
+      audioEl.onended = audioEl.onerror = () => {
+        try { if (activeUrl) URL.revokeObjectURL(activeUrl); } catch {}
+        playing = false;
+        activeFrames = [];
+        activeTimes = null;
+        stopVisemeLoop();
+        resetMorphs();
+        playNext();
+      };
+      audioEl.onplay = () => startVisemeLoop();
+      audioEl.onpause = () => stopVisemeLoop();
+
+      audioEl.play().catch(err => {
+        logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
+        playing = false;
+        resetMorphs();
+      });
     }
 
-    function formatVisemeFrames(vis, opts = {}) {
-      const frames = Array.isArray(vis) ? vis : [];
-      const maxFrames = opts.maxFrames ?? 24;
-      const maxFloats = opts.maxFloats ?? 15;
-      const round = (n) => (typeof n === 'number' ? Number(n.toFixed(3)) : 0).toFixed(3);
-      const rows = [];
-      const count = Math.min(frames.length, maxFrames);
-      for (let i = 0; i < count; i++) {
-        const f = Array.isArray(frames[i]) ? frames[i] : [];
-        const floats = f.slice(0, maxFloats).map(round).join(', ');
-        rows.push(`${String(i).padStart(3, '0')}: [ ${floats} ]`);
-      }
-      if (frames.length > count) rows.push(`… (${frames.length - count} more frame(s) not shown)`);
-      return rows.join('\n');
-    }
+    // ---------- WS wiring ----------
+    $('#loadAvatarBtn').onclick = (e) => {
+      e.preventDefault();
+      const url = $('#glbUrl').value.trim();
+      if (!url) { alert('Provide a Ready Player Me GLB URL'); return; }
+      loadAvatar(url);
+    };
 
-    // ---------- UI wiring for WS ----------
+    // Test mouth button (ARKit: jawOpen = 1 for 600ms)
+    $('#btnVisemeTest').onclick = (e) => {
+      e.preventDefault();
+      const f = new Array(15).fill(0); f[0] = 1; // jawOpen
+      applyVisemeFrame(f, 'arkit15');
+      setTimeout(() => applyVisemeFrame(new Array(15).fill(0), 'arkit15'), 600);
+    };
+
     $('#connectBtn').onclick = (e) => {
       e.preventDefault();
       const bot=$('#botId').value.trim(), thr=$('#threadId').value.trim(), key=$('#apiKey').value.trim();
@@ -513,9 +819,10 @@
         $('#sendBtn').disabled = false;
         $('#disconnectBtn').disabled = false;
         $('#btnPing').disabled = false;
-        $('#micStart').disabled = false;
         $('#btnToggleMute').disabled = false;
         $('#btnStopAudio').disabled = false;
+        $('#pttButton').disabled = false;
+        updateMicPermBadge(); // reflect current permission right away
         logLine($('#evtLog'), `[${now()}] open ${url}`);
       };
       ws.onclose = (ev) => {
@@ -523,10 +830,9 @@
         $('#sendBtn').disabled = true;
         $('#disconnectBtn').disabled = true;
         $('#btnPing').disabled = true;
-        $('#micStart').disabled = true;
-        $('#micStop').disabled = true;
         $('#btnToggleMute').disabled = true;
         $('#btnStopAudio').disabled = true;
+        $('#pttButton').disabled = true;
         logLine($('#evtLog'), `[${now()}] close code=${ev.code}`);
         clearAudioQueue();
       };
@@ -562,42 +868,42 @@
             break;
           }
 
-          case 'text_sentence': {
-            const s = (msg.text || '').toString();
-            console.log('Emotion:', msg.emotion);
-            const emoStr = formatEmotion(msg.emotion);
-            logLine($('#textSentences'), `[${now()}] ${s}${emoStr}`);
+          case 'emotion': {
+            const e = msg.emotion || {};
+            setEmotionBadge(e.name, e.intensity);
+            logLine($('#evtLog'), `[${now()}] emotion ${JSON.stringify(e)}`);
             break;
           }
 
           case 'slides_response': {
-            const raw = ('slides' in msg) ? {slides: msg.slides} :
-                        ('slides_raw' in msg) ? {slides_raw: msg.slides_raw} : msg;
-            logLine($('#slidesLog'), `[${now()}] ${JSON.stringify(raw)}`);
+            const payload = ('slides' in msg) ? {slides: msg.slides}
+                          : ('slides_raw' in msg) ? {slides_raw: msg.slides_raw} : msg;
+            const pretty = JSON.stringify(payload, null, 2);
+            logLine($('#slidesLog'), pretty + "\n");
             break;
           }
 
           case 'slides_done':
-            logLine($('#slidesLog'), `[${now()}] slides_done`);
+            logLine($('#slidesLog'), `-- slides_done --`);
             break;
 
           case 'audio_response': {
             const b64 = msg.audio || '';
-            const vis = Array.isArray(msg.viseme) ? msg.viseme : [];
-            // 👇 Console: frames length + full frames array (careful: may be large)
-            console.log('[viseme] frames length:', vis.length);
-            console.log('[viseme] frames:', vis);
+            const frames = Array.isArray(msg.viseme) ? msg.viseme : [];
+            const fmt = (msg.viseme_format || 'arkit15').toLowerCase();
+
+            // Prefer explicit timing from backend (seconds). Else use viseme_fps.
+            const times = Array.isArray(msg.viseme_times) ? msg.viseme_times.map(Number) : null;
+            const fps = Number(msg.viseme_fps || 0);
+
+            const framesSpec = times ? { frames, times } : (fps > 0 ? { frames, fps } : frames);
 
             const preview = typeof b64 === 'string'
               ? (b64.startsWith('data:') ? b64.split(',')[1] || '' : b64)
               : '';
             const head = preview.slice(0, 96);
 
-            // queue audio + draw heatmap + start realtime visualizer on play
-            queueAudio(b64, vis, `frames=${vis.length} len=${preview.length}`);
-
-            const pretty = formatVisemeFrames(vis, { maxFrames: 24 });
-            logLine($('#audioLog'), `[${now()}] audio_response head=${head}…\nidx: [ v0, v1, … v14 ]\n${pretty}`);
+            queueAudio(b64, framesSpec, fmt, `head=${head}…`);
             break;
           }
 
@@ -639,7 +945,7 @@
       e.preventDefault();
       if (!ws || ws.readyState !== 1) return;
       ws.send(JSON.stringify({ type: 'stop_audio' }));
-      clearAudioQueue(); // stop immediately on client
+      clearAudioQueue();
     };
 
     $('#sendBtn').onclick = sendText;
@@ -658,64 +964,138 @@
       $('#chatInput').value = '';
     }
 
-    // ---------- mic ----------
+    // ---------- Push-to-Talk (hold/release) ----------
     let mediaStream = null, recorder = null, chunks = [];
-    $('#micStart').onclick = async (e) => {
-      e.preventDefault();
+    let recMime = 'audio/webm';
+
+    function pickRecorderMime() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4;codecs=mp4a.40.2',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/ogg'
+      ];
+      for (const m of candidates) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
+          return m;
+        }
+      }
+      return 'audio/webm'; // fallback
+    }
+
+    async function ensureMic() {
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mime = 'audio/webm';
-        recorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 64000 });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        return stream;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function updateMicPermBadge() {
+      const btn = $('#micPermBtn');
+      if (navigator.permissions && navigator.permissions.query) {
+        navigator.permissions.query({ name: 'microphone' }).then(st => {
+          const denied = st.state === 'denied';
+          btn.classList.toggle('hidden', !denied);
+          $('#micStatus').textContent = `mic: ${st.state}`;
+        }).catch(() => {});
+      }
+    }
+
+    async function startPTT() {
+      if (!ws || ws.readyState !== 1) return;
+      $('#pttButton').classList.add('ring-4','ring-emerald-300');
+      $('#micStatus').textContent = 'recording…';
+      try {
+        mediaStream = await ensureMic();
+        if (!mediaStream) {
+          $('#micStatus').textContent = 'mic blocked/denied';
+          $('#micPermBtn').classList.remove('hidden');
+          $('#pttButton').classList.remove('ring-4','ring-emerald-300');
+          return;
+        }
+        recMime = pickRecorderMime();
+        recorder = new MediaRecorder(mediaStream, { mimeType: recMime, audioBitsPerSecond: 64000 });
         chunks = [];
         recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-        recorder.onstart = () => { $('#micStatus').textContent = `recording… (${mime})`; $('#micStart').disabled = true; $('#micStop').disabled = false; };
         recorder.start();
-      } catch (e2) {
-        $('#micStatus').textContent = `! mic error: ${e2}`;
+      } catch (e) {
+        $('#micStatus').textContent = `! mic error: ${e}`;
+        $('#micPermBtn').classList.remove('hidden');
+        $('#pttButton').classList.remove('ring-4','ring-emerald-300');
       }
-    };
-    $('#micStop').onclick = async (e) => {
-      e.preventDefault();
-      try {
-        if (!recorder) return;
-        await new Promise(res => { recorder.onstop = res; recorder.stop(); });
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-        $('#micStart').disabled = false; $('#micStop').disabled = true;
-        $('#micStatus').textContent = `encoding…`;
+    }
 
+    async function stopPTT(send=true) {
+      $('#pttButton').classList.remove('ring-4','ring-emerald-300');
+      try {
+        if (!recorder) { $('#micStatus').textContent = 'mic: idle'; return; }
+        await new Promise(res => { recorder.onstop = res; recorder.stop(); });
+        const blob = new Blob(chunks, { type: recMime });
+        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+        recorder = null; mediaStream = null;
         const dataUrl = await blobToBase64(blob);
         const b64 = (dataUrl.split(',')[1] || '');
-        $('#micStatus').textContent = `sending ${b64.length} bytes…`;
-
-        if (ws && ws.readyState === 1) {
+        if (send && ws && ws.readyState === 1) {
           ws.send(JSON.stringify({
             type: 'audio_query',
             audio: dataUrl,
-            format: 'webm',
+            format: (recMime.includes('mp4') ? 'm4a' : recMime.includes('ogg') ? 'ogg' : 'webm'),
             muteAudio: $('#muteOnSend').checked
           }));
-          logLine($('#evtLog'), `[${now()}] sent audio_query size=${b64.length}`);
+          logLine($('#evtLog'), `[${now()}] sent audio_query size=${b64.length} fmt=${recMime}`);
+          $('#micStatus').textContent = `sent (${(blob.size/1024).toFixed(1)} KB)`;
         } else {
-          $('#micStatus').textContent = `not connected`;
+          $('#micStatus').textContent = 'not connected';
         }
       } catch (e3) {
         $('#micStatus').textContent = `! send error: ${e3}`;
       } finally {
-        recorder = null; mediaStream = null; chunks = [];
-        setTimeout(()=>$('#micStatus').textContent='idle', 800);
+        chunks = [];
+        setTimeout(()=>$('#micStatus').textContent='mic: idle', 800);
+      }
+    }
+
+    // PTT bindings (mouse + touch)
+    const ptt = $('#pttButton');
+    ptt.addEventListener('mousedown', (e)=>{ e.preventDefault(); startPTT(); });
+    ptt.addEventListener('touchstart', (e)=>{ e.preventDefault(); startPTT(); }, {passive:false});
+    const finish = (e)=>{ e.preventDefault(); stopPTT(true); };
+    ptt.addEventListener('mouseup', finish);
+    ptt.addEventListener('mouseleave', (e)=>{ if (recorder) stopPTT(true); });
+    ptt.addEventListener('touchend', finish, {passive:false});
+    ptt.addEventListener('touchcancel', (e)=>{ e.preventDefault(); stopPTT(false); }, {passive:false});
+
+    // Permission helper
+    $('#micPermBtn').onclick = async (e) => {
+      e.preventDefault();
+      $('#micStatus').textContent = 'requesting mic…';
+      const stream = await ensureMic();
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        $('#micPermBtn').classList.add('hidden');
+        $('#micStatus').textContent = 'mic: granted';
+      } else {
+        $('#micStatus').textContent = 'mic: denied';
       }
     };
 
-    // ---------- panel copy/clear ----------
-    $('#textCopy').onclick = ()=>{ const txt = ($('#textTokens').textContent || '') + '\n' + ($('#textSentences').textContent || ''); navigator.clipboard.writeText(txt); };
-    $('#textClear').onclick = ()=>{ clearEl($('#textTokens')); clearEl($('#textSentences')); };
+    // panel copy/clear
+    $('#textCopy').onclick = ()=>copyText($('#textTokens'));
+    $('#textClear').onclick = ()=>clearEl($('#textTokens'));
     $('#slidesCopy').onclick = ()=>copyText($('#slidesLog'));
     $('#slidesClear').onclick = ()=>clearEl($('#slidesLog'));
     $('#audioCopy').onclick = ()=>copyText($('#audioLog'));
     $('#audioClear').onclick = ()=>{ clearEl($('#audioLog')); clearAudioQueue(); };
     $('#evtCopy').onclick = ()=>copyText($('#evtLog'));
     $('#evtClear').onclick = ()=>clearEl($('#evtLog'));
+
+    // boot
+    initThree();
+    updateMicPermBadge();
   </script>
 </body>
 </html>

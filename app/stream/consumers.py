@@ -27,8 +27,10 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024
 STT_MODEL_DEFAULT = os.getenv("OPENAI_STT_MODEL", "whisper-1")
 THREAD_ID_PATTERN = re.compile(r"^user_[0-9a-f]{16}$", re.I)
 
+
 def _fmt_local(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 
 def _infer_ext_from_dataurl_or_hint(b64_or_dataurl: str, fmt_hint: Optional[str] = None) -> str:
     if isinstance(b64_or_dataurl, str) and b64_or_dataurl.startswith("data:"):
@@ -48,15 +50,16 @@ def _infer_ext_from_dataurl_or_hint(b64_or_dataurl: str, fmt_hint: Optional[str]
     if "mpeg" in fmt or "mp3" in fmt or "mpga" in fmt: return "mp3"
     return "webm"
 
+
 class ChatConsumer(AsyncJsonWebsocketConsumer):
     """
     Outbound events (forwarded from engine queue):
       - connected
       - response_start
       - text_token {token, local_time}
-      - text_sentence {text, emotion?, local_time}
-      - audio_response {audio, viseme}
-      - slides_response {slides|slides_raw, local_time}
+      - audio_response {audio, viseme, local_time}
+      - emotion {emotion: {name, intensity}, local_time}
+      - slides_response {slides, local_time}
       - slides_done
       - response_done {timings}
       - response_ended
@@ -231,16 +234,18 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                     break
                 t = item.get("type")
 
-                if t in ("text_token", "text_sentence"):
+                if t == "text_token":
                     out = dict(item)
                     out["local_time"] = browser_time
                     await self.send_json(out)
 
                 elif t == "audio_response":
-                    if self.audio_stopped:
+                    if self.audio_stopped or self.audio_muted:
                         continue
-                    if self.audio_muted:
-                        continue
+                    item["local_time"] = browser_time
+                    await self.send_json(item)
+
+                elif t == "emotion":
                     item["local_time"] = browser_time
                     await self.send_json(item)
 
@@ -251,6 +256,15 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
                 elif t == "error":
                     await self.send_json({"type": "error", "message": item.get("message", "unknown")})
+
+                else:
+                    # Forward unknown engine events verbatim (future-proofing)
+                    try:
+                        item["local_time"] = browser_time
+                    except Exception:
+                        pass
+                    await self.send_json(item)
+
         except asyncio.CancelledError:
             # normal during cancellations between runs
             pass
@@ -297,6 +311,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if len(payload) > MAX_AUDIO_BYTES:
             await self.send_json({"type": "error", "message": "Audio too large"})
             return
+
         ext = _infer_ext_from_dataurl_or_hint(b64, data.get("format"))
         filename = f"audio.{ext}"
         try:

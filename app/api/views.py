@@ -1,4 +1,3 @@
-# api/views.py
 from __future__ import annotations
 from django.shortcuts import render
 from rest_framework import status
@@ -25,13 +24,6 @@ from api.serializers import (
 
 # ---------- Helper mixin: always return READ serializer on writes ----------
 class ReturnReadOnWriteMixin:
-    """
-    For create/update/partial_update, serialize the instance with the READ serializer
-    so clients get the full detail payload (same as GET).
-
-    IMPORTANT: we delegate to perform_create/perform_update so viewsets can
-    inject things like `user=self._resolve_auth_user()`.
-    """
     read_serializer_class = None
     write_serializer_class = None
 
@@ -41,12 +33,9 @@ class ReturnReadOnWriteMixin:
         return self.read_serializer_class or super().get_serializer_class()
 
     def _serialize_read(self, instance):
-        serializer = self.read_serializer_class(
-            instance, context=self.get_serializer_context()
-        )
+        serializer = self.read_serializer_class(instance, context=self.get_serializer_context())
         return serializer.data
 
-    # Default hooks (views can override)
     def perform_create(self, serializer):
         serializer.save()
 
@@ -56,10 +45,7 @@ class ReturnReadOnWriteMixin:
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        # Let the view inject user/tenant/etc.
         self.perform_create(serializer)
-
         instance = serializer.instance
         headers = self.get_success_headers(serializer.data)
         return Response(self._serialize_read(instance), status=status.HTTP_201_CREATED, headers=headers)
@@ -69,10 +55,7 @@ class ReturnReadOnWriteMixin:
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
-
-        # Let the view customize update
         self.perform_update(serializer)
-
         instance = serializer.instance
         return Response(self._serialize_read(instance), status=status.HTTP_200_OK)
 
@@ -80,10 +63,12 @@ class ReturnReadOnWriteMixin:
         kwargs["partial"] = True
         return self.update(request, *args, **kwargs)
 
+
 # ------------------- Swagger shared params (cleaned) -------------------
 USER_SCOPE_PARAMS = [
     OpenApiParameter(name="user_id", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to user id"),
 ]
+
 
 # ------------------- Voices -------------------
 @extend_schema_view(
@@ -105,6 +90,7 @@ class VoiceViewSet(ReturnReadOnWriteMixin, ModelViewSet):
 
     read_serializer_class = VoiceReadSerializer
     write_serializer_class = VoiceWriteSerializer
+
 
 # ------------------- Agents -------------------
 @extend_schema_view(
@@ -140,6 +126,7 @@ class AgentViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewS
             raise ValidationError("API key is not linked to a valid user.")
         serializer.save(user=user)
 
+
 # ------------------- Sessions -------------------
 @extend_schema_view(
     list=extend_schema(summary="List sessions", parameters=USER_SCOPE_PARAMS),
@@ -173,6 +160,7 @@ class SessionViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelVie
             raise ValidationError("API key is not linked to a valid user.")
         serializer.save(user=user)
 
+
 # ------------------- Chats -------------------
 @extend_schema_view(
     list=extend_schema(summary="List chat messages", parameters=USER_SCOPE_PARAMS),
@@ -198,6 +186,7 @@ class ChatViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSe
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
 
+
 # ------------------- Slides -------------------
 @extend_schema_view(
     list=extend_schema(summary="List slides", parameters=USER_SCOPE_PARAMS),
@@ -222,6 +211,7 @@ class SlidesViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelView
 
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
+
 
 # ------------------- Simple dev test endpoint -------------------
 def testView(request):

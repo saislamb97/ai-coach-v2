@@ -2,89 +2,62 @@ from __future__ import annotations
 
 import json
 import logging
-import time
+import os
 import re
+import time
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 import wikipedia
+from asgiref.sync import sync_to_async
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, field_validator
 
+from memory.models import Slides  # Django ORM
+
 log = logging.getLogger(__name__)
+DB_PRIMARY = os.getenv("DB_PRIMARY_ALIAS", "default")
 
 # -----------------------------------------------------------------------------
-# Shared tool context (auto-injected by nodes): session/bot/agent IDs
+# Shared tool context
 # -----------------------------------------------------------------------------
 _TOOL_CTX: ContextVar[Dict[str, Any]] = ContextVar("TOOL_CTX", default={})
 
-
 def set_tool_context(ctx: Dict[str, Any]) -> None:
-    """Inject session/bot/agent metadata so tools can stamp responses."""
     _TOOL_CTX.set(dict(ctx or {}))
 
-
 def get_tool_context() -> Dict[str, Any]:
-    """Return the current tool context (safe copy)."""
     return dict(_TOOL_CTX.get() or {})
 
-
 # =============================================================================
-# Public metadata (used by preambles / admin UI)
+# Metadata
 # =============================================================================
 AGENT_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "search_wikipedia": "Find a topic and return a brief 1–2 sentence summary from Wikipedia.",
-    "generate_or_update_slides": "Create/update a session presentation in Editor.js format. Can enrich with AI.",
+    "fetch_latest_slides": "Read-only: fetch the latest slide snapshot for the current session (current + previous + version).",
+    "generate_or_update_slides": "Create/update a session presentation in Editor.js format. Skips empty input.",
+    "emotion_analyze": "Return a single dominant emotion with intensity 1..3 for a given text.",
 }
 
-AGENT_TOOL_CHOICES: List[Tuple[str, str]] = sorted(
-    [
-        ("search_wikipedia", "Wikipedia Search"),
-        ("generate_or_update_slides", "Generate/Update Slides"),
-    ],
-    key=lambda x: x[1].lower(),
-)
-
-
 def default_agent_tools() -> List[str]:
-    return ["search_wikipedia", "generate_or_update_slides"]
-
-
-# =============================================================================
-# Small utils
-# =============================================================================
-def _elapsed_ms(t0: float) -> int:
-    return int((time.perf_counter() - t0) * 1000)
-
-
-def _wrap_ok(data: Any, **meta) -> Dict[str, Any]:
-    # kept for wikipedia only (slides returns raw payload for callers)
-    return {"status": "succeeded", "data": data, "meta": meta or {}}
-
-
-def _wrap_err(msg: str, **meta) -> Dict[str, Any]:
-    return {"status": "failed", "error": msg, "meta": meta or {}}
-
-
-def _preview(v: Any, n: int = 160) -> str:
-    try:
-        s = str(v)
-    except Exception:
-        s = repr(v)
-    return s if len(s) <= n else f"{s[: n//2]} … {s[-(n//2):]}"
-
+    return ["search_wikipedia", "fetch_latest_slides", "generate_or_update_slides", "emotion_analyze"]
 
 # =============================================================================
-# Editor.js helpers (pure, side-effect-free)
+# Editor.js helpers (pure)
 # =============================================================================
 EditorJS = Dict[str, Any]
+ALLOWED_BLOCK_TYPES = {"header", "paragraph", "list"}
+MAX_BLOCKS = 120
 
-ALLOWED_BLOCK_TYPES = {"header", "paragraph", "list"}  # keep it tight for now
-MAX_BLOCKS = 120  # guardrail so we don't persist giant decks
+def _elapsed_ms(t0: float) -> int:
+    import time as _t
+    return int((_t.perf_counter() - t0) * 1000)
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 def _coerce_blocks(blocks_any: Any) -> List[Dict[str, Any]]:
     if not isinstance(blocks_any, list):
@@ -93,44 +66,29 @@ def _coerce_blocks(blocks_any: Any) -> List[Dict[str, Any]]:
     for b in blocks_any:
         if not isinstance(b, dict):
             continue
-        btype = (b.get("type") or "").strip()
-        bdata = b.get("data")
-        if not isinstance(btype, str) or not isinstance(bdata, dict):
+        t = (b.get("type") or "").lower()
+        d = b.get("data") if isinstance(b.get("data"), dict) else None
+        if t not in ALLOWED_BLOCK_TYPES or d is None:
             continue
-        t = btype.lower()
-        if t not in ALLOWED_BLOCK_TYPES:
-            continue
-        # normalize header level (2 or 3 only)
         if t == "header":
-            level = int(bdata.get("level", 2))
+            level = int(d.get("level", 2))
             if level not in (2, 3):
                 level = 2
-            bdata = {**bdata, "level": level}
-        # normalize list items (ensure list of strings)
+            d = {**d, "level": level}
         if t == "list":
-            items = bdata.get("items")
+            items = d.get("items")
             if not isinstance(items, list):
                 items = []
-            bdata = {**bdata, "items": [str(x) for x in items if isinstance(x, (str, int, float))]}
-        out.append({"type": t, "data": bdata})
+            d = {**d, "items": [str(x) for x in items if isinstance(x, (str, int, float))]}
+        out.append({"type": t, "data": d})
         if len(out) >= MAX_BLOCKS:
             break
     return out
 
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
 def normalize_editorjs(obj: Any) -> Optional[EditorJS]:
-    """
-    Accepts: full Editor.js dict, {"blocks":[...]}, or bare list of blocks.
-    Returns normalized dict or None if invalid/empty.
-    """
     if isinstance(obj, list):
         blocks = _coerce_blocks(obj)
         return {"time": _now_ms(), "blocks": blocks, "version": "2.x"} if blocks else None
-
     if isinstance(obj, dict) and "blocks" in obj:
         blocks = _coerce_blocks(obj.get("blocks"))
         if not blocks:
@@ -144,97 +102,42 @@ def normalize_editorjs(obj: Any) -> Optional[EditorJS]:
         return {"time": time_val, "blocks": blocks, "version": str(ver)}
     return None
 
+def minimal_editorjs(title: str, summary: str) -> EditorJS:
+    title = (title or "").strip()[:120]
+    summary = (summary or "").strip()[:200]
+    blocks: List[Dict[str, Any]] = []
+    if title:
+        blocks.append({"type": "header", "data": {"text": title, "level": 2}})
+    if summary:
+        blocks.append({"type": "paragraph", "data": {"text": summary}})
+    return {"time": _now_ms(), "version": "2.x", "blocks": blocks}
 
-def _first_text_from_blocks(blocks: List[Dict[str, Any]]) -> str:
-    for b in blocks:
-        txt = (b.get("data", {}).get("text") or "").strip()
-        if txt:
-            return txt
-    return ""
-
-
-def _infer_title_summary(ej: EditorJS, title_in: Optional[str], summary_in: Optional[str]) -> tuple[str, str]:
-    """
-    Title: first header.text else any text.
-    Summary: first paragraph.text else next text block(s) joined (<=160 chars).
-    """
-    blocks = ej.get("blocks") or []
-    title = (title_in or "").strip()
-    summary = (summary_in or "").strip()
-
-    if not title:
+def _ensure_single_top_header(blocks: List[Dict[str, Any]], title: Optional[str]) -> List[Dict[str, Any]]:
+    if title:
+        seen_header = False
+        out: List[Dict[str, Any]] = []
         for b in blocks:
             if b.get("type") == "header":
-                t = (b.get("data", {}).get("text") or "").strip()
-                if t:
-                    title = t
-                    break
-        if not title:
-            title = _first_text_from_blocks(blocks)[:80] or "Presentation"
-
-    if not summary:
-        for b in blocks:
-            if b.get("type") == "paragraph":
-                p = (b.get("data", {}).get("text") or "").strip()
-                if p:
-                    summary = p
-                    break
-        if not summary:
-            parts: List[str] = []
-            for b in blocks:
-                t = (b.get("data", {}).get("text") or "").strip()
-                if t:
-                    parts.append(t)
-                if len(" ".join(parts)) >= 160:
-                    break
-            summary = " ".join(parts)[:160]
-
-    return title or "Presentation", summary or ""
-
-
-def minimal_editorjs(title: str, summary: str) -> EditorJS:
-    title = (title or "Presentation").strip()[:120]
-    summary = (summary or "").strip()[:200]
-    return {
-        "time": _now_ms(),
-        "version": "2.x",
-        "blocks": [
-            {"type": "header", "data": {"text": title, "level": 2}},
-            {"type": "paragraph", "data": {"text": summary or " "}},
-        ],
-    }
-
-
-def _ensure_single_top_header(blocks: List[Dict[str, Any]], title: str) -> List[Dict[str, Any]]:
-    """
-    Guarantee exactly one top header. If none exists, insert one.
-    If one exists and differs from title, keep AI's header (no duplicates).
-    Remove extra header blocks beyond the first.
-    """
-    first_header_idx = next((i for i, b in enumerate(blocks) if b.get("type") == "header"), -1)
-    if first_header_idx == -1:
-        # add our header up front
-        blocks = [{"type": "header", "data": {"text": title, "level": 2}}] + blocks
-        first_header_idx = 0
-
-    # remove all subsequent headers
-    filtered: List[Dict[str, Any]] = []
-    seen_header = False
-    for i, b in enumerate(blocks):
-        if b.get("type") != "header":
-            filtered.append(b)
-            continue
+                if not seen_header:
+                    out.append({"type": "header", "data": {"text": title, "level": 2}})
+                    seen_header = True
+            else:
+                out.append(b)
         if not seen_header:
-            # keep the first header but normalize level
-            h = {"type": "header", "data": {"text": (b.get("data", {}).get("text") or title).strip() or title, "level": 2}}
-            filtered.append(h)
-            seen_header = True
-        # else: skip additional header blocks entirely
-    return filtered
-
+            out = [{"type": "header", "data": {"text": title, "level": 2}}] + out
+        return out
+    first = True
+    out: List[Dict[str, Any]] = []
+    for b in blocks:
+        if b.get("type") == "header":
+            if first:
+                out.append({"type": "header", "data": {"text": (b.get('data', {}).get('text') or '').strip(), "level": 2}})
+                first = False
+        else:
+            out.append(b)
+    return out
 
 def _compact_paragraphs(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Merge consecutive small paragraphs into one to reduce clutter."""
     out: List[Dict[str, Any]] = []
     carry: Optional[str] = None
     for b in blocks:
@@ -245,7 +148,6 @@ def _compact_paragraphs(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if carry is None:
                 carry = text
             else:
-                # merge small paragraphs
                 if len(carry) + len(text) <= 320:
                     carry = f"{carry} {text}"
                 else:
@@ -260,19 +162,34 @@ def _compact_paragraphs(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append({"type": "paragraph", "data": {"text": carry}})
     return out
 
+def _headers(ej: Dict[str, Any]) -> List[str]:
+    out = []
+    for b in (ej or {}).get("blocks", []):
+        if (b.get("type") or "").lower() == "header":
+            t = (b.get("data", {}).get("text") or "").strip()
+            if t:
+                out.append(t)
+    return out
+
+def _diff_simple_headers(cur_ej: Dict[str, Any], prev_ej: Dict[str, Any]) -> Dict[str, List[str]]:
+    cur = _headers(cur_ej or {})
+    prev = _headers(prev_ej or {})
+    added = [h for h in cur if h not in prev]
+    removed = [h for h in prev if h not in cur]
+    unchanged = [h for h in cur if h in prev]
+    return {"added": added, "removed": removed, "unchanged": unchanged}
 
 # =============================================================================
-# Pydantic schemas
+# Schemas
 # =============================================================================
 class WikipediaInput(BaseModel):
     query: str = Field(..., description="Topic to summarize in 1–2 sentences")
 
-
 class SlideInput(BaseModel):
-    title: Optional[str] = Field(None, description="Deck title (optional; inferred if blank)")
-    summary: Optional[str] = Field(None, description="Short abstract (optional; inferred if blank)")
+    title: Optional[str] = Field(None, description="Deck title (optional)")
+    summary: Optional[str] = Field(None, description="Short abstract (optional)")
     editorjs: Optional[EditorJS | List[Dict[str, Any]]] = Field(
-        None, description="Editor.js document or blocks[]; optional for creation"
+        None, description="Editor.js document or blocks[]; optional"
     )
     ai_enrich: bool = Field(True, description="If true, LLM expands with outline/sections")
     max_sections: int = Field(6, ge=1, le=12, description="Max sections when AI enrichment is enabled.")
@@ -287,28 +204,28 @@ class SlideInput(BaseModel):
             raise ValueError("editorjs must contain non-empty blocks in Editor.js format")
         return ej
 
+class EmotionInput(BaseModel):
+    text: str = Field(..., description="Full response text to classify (one dominant emotion).")
+
+class FetchSlidesInput(BaseModel):
+    """No arguments; relies on tool context for session_id."""
+    pass
 
 # =============================================================================
-# Internal LLM helpers for slide enrichment
+# Internal LLM helpers
 # =============================================================================
 def _extract_json_maybe(raw: str) -> Optional[dict]:
-    """
-    Be resilient to code-fences or accidental prose: try best to parse JSON object.
-    """
     raw = (raw or "").strip()
     if not raw:
         return None
-    # strip triple backticks if present
     fence = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
     m = fence.match(raw)
     if m:
         raw = m.group(1).strip()
-    # direct parse
     try:
         return json.loads(raw)
     except Exception:
         pass
-    # find first {...} region heuristically (simple, good-enough)
     try:
         start = raw.find("{")
         end = raw.rfind("}")
@@ -318,18 +235,14 @@ def _extract_json_maybe(raw: str) -> Optional[dict]:
         pass
     return None
 
-
 async def _ai_expand_editorjs(
     *,
-    title: str,
+    title: Optional[str],
     summary: str,
     base_ej: EditorJS,
     max_sections: int,
-    model: str | None = None,
+    model: Optional[str] = None,
 ) -> Optional[EditorJS]:
-    """
-    Return Editor.js JSON with section headers and short text bullets.
-    """
     model_name = (model or "gpt-4o-mini").strip()
     llm = ChatOpenAI(model=model_name, temperature=0.2, timeout=20)
 
@@ -337,16 +250,15 @@ async def _ai_expand_editorjs(
         "Generate slide content as Editor.js JSON ONLY.\n"
         'Schema: {"time":INT,"version":"2.x","blocks":[...]}\n'
         "Use 'header' (level 3) for SECTION titles (not the deck title).\n"
-        "Do NOT output a duplicate top-level title header; assume the deck already has one.\n"
+        "Do NOT output a duplicate top-level title header; assume the deck title is provided separately.\n"
         "Use 'paragraph' and optional 'list' (unordered, items:[...]).\n"
         f"Keep <= {max_sections} concise, non-redundant sections."
     )
     user = (
-        f"# Deck Title\n{title}\n\n"
-        f"# Summary\n{summary}\n\n"
-        f"# Sample Blocks (first 2 shown)\n"
-        f"{json.dumps(base_ej.get('blocks', [])[:2], ensure_ascii=False)}\n"
-        "\nReturn ONLY valid JSON."
+        (f"# Deck Title\n{title}\n\n" if title else "")
+        + f"# Summary\n{summary}\n\n"
+        + f"# Sample Blocks (first 2 shown)\n{json.dumps(base_ej.get('blocks', [])[:2], ensure_ascii=False)}\n"
+        + "\nReturn ONLY valid JSON."
     )
 
     try:
@@ -359,18 +271,48 @@ async def _ai_expand_editorjs(
         log.warning("[slide:ai_enrich] failed to expand deck: %s", e)
         return None
 
+# =============================================================================
+# ORM read helper (wrapped for async contexts)
+# =============================================================================
+@sync_to_async
+def _db_fetch_latest_slides_snapshot(session_id: int) -> Optional[Dict[str, Any]]:
+    s = (
+        Slides.objects.using(DB_PRIMARY)
+        .filter(session_id=session_id)
+        .order_by("-updated_at")
+        .first()
+    )
+    if not s:
+        return None
+    s.refresh_from_db(using=DB_PRIMARY)
+    snap = {
+        "title": s.title,
+        "summary": s.summary,
+        "editorjs": s.editorjs,
+        "previous": {
+            "title": s.previous_title,
+            "summary": s.previous_summary,
+            "editorjs": s.previous_editorjs,
+        },
+        "version": s.version,
+        "thread_id": s.session.thread_id,
+        "updated_by": s.updated_by,
+        "updated_at": s.updated_at.isoformat(),
+        "diff_headers": _diff_simple_headers(s.editorjs or {}, s.previous_editorjs or {}),
+    }
+    return snap
 
 # =============================================================================
 # Tools
 # =============================================================================
-@tool("search_wikipedia", args_schema=WikipediaInput)
+@tool(
+    "search_wikipedia",
+    args_schema=WikipediaInput,
+    description="Return a brief 1–2 sentence summary for a topic from Wikipedia.",
+)
 async def search_wikipedia(query: str) -> Dict[str, Any]:
-    """
-    Return a brief 1–2 sentence summary for a topic from Wikipedia.
-    Non-blocking: calls wikipedia APIs in a worker thread.
-    """
+    """Return a brief 1–2 sentence summary for a topic from Wikipedia."""
     import asyncio
-
     wikipedia.set_lang("en")
 
     async def _search_and_summary(q: str) -> Tuple[List[str], Optional[str]]:
@@ -378,45 +320,65 @@ async def search_wikipedia(query: str) -> Dict[str, Any]:
             hits = wikipedia.search(q, results=5)
             if not hits:
                 return [], None
-            # prefer exact/startswith match
             title = next((h for h in hits if h.lower() == q.lower() or h.lower().startswith(q.lower())), hits[0])
             try:
                 summary = wikipedia.summary(title, sentences=2)
             except Exception:
                 summary = None
             return hits, summary
-
         return await asyncio.to_thread(_blocking)
 
     t0 = time.perf_counter()
     q = (query or "").strip()
-    log.info("[tool:wikipedia] query=%s", _preview(q))
     if not q:
-        return _wrap_err("empty_query")
+        return {"status": "failed", "error": "empty_query", "meta": {}}
 
     try:
         hits, summary = await _search_and_summary(q)
         if not hits:
-            return _wrap_err("no_results", query=q)
+            return {"status": "failed", "error": "no_results", "meta": {"query": q}}
         if not summary:
-            return _wrap_err("not_found", query=q)
+            return {"status": "failed", "error": "not_found", "meta": {"query": q}}
         ms = _elapsed_ms(t0)
         ctx = get_tool_context()
-        return _wrap_ok(
-            {"query": q, "title": hits[0], "summary": summary, **ctx},
-            elapsed_ms=ms,
-            suggestions=hits,
-        )
+        return {"status": "succeeded", "data": {"query": q, "title": hits[0], "summary": summary, **ctx}, "meta": {"elapsed_ms": ms, "suggestions": hits}}
     except wikipedia.exceptions.DisambiguationError as e:
-        return _wrap_err("ambiguous", suggestions=e.options[:8], query=q)
+        return {"status": "failed", "error": "ambiguous", "meta": {"suggestions": e.options[:8], "query": q}}
     except wikipedia.exceptions.PageError:
-        return _wrap_err("not_found", query=q)
+        return {"status": "failed", "error": "not_found", "meta": {"query": q}}
     except Exception as e:
         log.exception("[tool:wikipedia] unexpected")
-        return _wrap_err(f"error:{e}", query=q)
+        return {"status": "failed", "error": f"error:{e}", "meta": {"query": q}}
 
+@tool(
+    "fetch_latest_slides",
+    args_schema=FetchSlidesInput,
+    description="Read-only: fetch the latest Slides row for this session from the primary DB.",
+)
+async def fetch_latest_slides() -> Dict[str, Any]:
+    """Read-only fetch of the latest slides snapshot for the current session (never writes)."""
+    t0 = time.perf_counter()
+    ctx = get_tool_context()
+    session_id = ctx.get("session_id")
+    if not session_id:
+        return {"status": "failed", "error": "missing_session_context"}
 
-@tool("generate_or_update_slides", args_schema=SlideInput)
+    try:
+        snap = await _db_fetch_latest_slides_snapshot(int(session_id))
+    except Exception as e:
+        log.exception("[tool:fetch_latest_slides] DB read failed")
+        return {"status": "failed", "error": f"db_error:{e}"}
+
+    if not snap:
+        return {"status": "not_found", "meta": {"elapsed_ms": _elapsed_ms(t0), **ctx}}
+
+    return {"status": "ok", "slides": snap, "meta": {"elapsed_ms": _elapsed_ms(t0), **ctx}}
+
+@tool(
+    "generate_or_update_slides",
+    args_schema=SlideInput,
+    description="Create or update slides for this session. Skips persistence if input is empty.",
+)
 async def generate_or_update_slides(
     title: Optional[str] = None,
     summary: Optional[str] = None,
@@ -424,54 +386,93 @@ async def generate_or_update_slides(
     ai_enrich: bool = True,
     max_sections: int = 6,
 ) -> Dict[str, Any]:
-    """
-    Create/update the session's Editor.js deck synchronously (no status/job_id).
-    ALWAYS use this when the user asks for a presentation/deck/slides/PPT/Keynote.
+    """Prepare a new slides payload; caller decides whether to persist via rotate/update."""
+    def meaningful(t: Any, s: Any, ej: Any) -> bool:
+        def _empty_str(v: Any) -> bool:
+            if not isinstance(v, str):
+                return True
+            vv = v.strip().lower()
+            return vv == "" or vv in {"string", "null", "none"}
+        has_t = isinstance(t, str) and not _empty_str(t)
+        has_s = isinstance(s, str) and not _empty_str(s)
+        has_b = isinstance(ej, dict) and bool(ej.get("blocks"))
+        return has_t or has_s or has_b
 
-    Returns: {"title":..., "summary":..., "editorjs":..., <tool_ctx>}
-    """
-    ctx = get_tool_context()
-
-    # Normalize/seed a base deck
     ej = normalize_editorjs(editorjs) if editorjs is not None else None
-    if not ej:
-        base_title = (title or "").strip() or "Presentation"
-        base_summary = (summary or "").strip()
-        ej = minimal_editorjs(base_title, base_summary)
+    title_clean = (title or "").strip()
+    summary_clean = (summary or "").strip()
 
+    if not meaningful(title_clean, summary_clean, ej):
+        return {"no_write": True, **get_tool_context()}
+
+    if ej is None:
+        ej = minimal_editorjs(title_clean, summary_clean)
+
+    deck_title: Optional[str] = title_clean or None
+    if deck_title is None:
+        for b in ej.get("blocks", []):
+            if b.get("type") == "header":
+                t = (b.get("data", {}).get("text") or "").strip()
+                if t:
+                    deck_title = t
+                    break
+
+    deck_summary = summary_clean
+
+    if ai_enrich:
+        enriched = await _ai_expand_editorjs(title=deck_title, summary=deck_summary, base_ej=ej, max_sections=max_sections)
+        if enriched and (enriched.get("blocks") or []):
+            blocks = list(enriched.get("blocks") or [])
+            blocks = _ensure_single_top_header(blocks, deck_title)
+            blocks = _compact_paragraphs(blocks)
+            ej = normalize_editorjs({"time": int(time.time() * 1000), "version": "2.x", "blocks": blocks}) or enriched
+
+    if not deck_title:
+        for b in ej.get("blocks", []):
+            if b.get("type") == "header":
+                deck_title = (b.get("data", {}).get("text") or "").strip() or deck_title
+                if deck_title:
+                    break
+
+    return {"title": deck_title or "", "summary": deck_summary, "editorjs": ej, **get_tool_context()}
+
+@tool(
+    "emotion_analyze",
+    args_schema=EmotionInput,
+    description="Classify a single dominant emotion (Joy/Anger/Sadness/Surprise) with intensity 1..3.",
+)
+async def emotion_analyze(text: str) -> Dict[str, Any]:
+    """Return a single dominant emotion and intensity 1..3 for the given text."""
+    model_name = "gpt-4o-mini"
+    llm = ChatOpenAI(model=model_name, temperature=0.0, timeout=8)
+    sys = (
+        "Return a SINGLE dominant emotion for the input.\n"
+        "Allowed names: Joy, Anger, Sadness, Surprise. Intensity: integer 1..3.\n"
+        'Return STRICT JSON ONLY like: {"name":"Joy","intensity":2}'
+    )
+    user = (text or "").strip()[:8000]
     try:
-        # Derive canonical title/summary from existing content
-        t, s = _infer_title_summary(ej, title, summary)
-
-        # Optional AI expand
-        if ai_enrich:
-            enriched = await _ai_expand_editorjs(title=t, summary=s, base_ej=ej, max_sections=max_sections)
-            if enriched and (enriched.get("blocks") or []):
-                blocks = list(enriched.get("blocks") or [])
-                # Ensure exactly one top-level header (fixes duplicate headers)
-                blocks = _ensure_single_top_header(blocks, t)
-                # Compact consecutive short paragraphs
-                blocks = _compact_paragraphs(blocks)
-                ej = normalize_editorjs({"time": _now_ms(), "version": "2.x", "blocks": blocks}) or enriched
-                t, s = _infer_title_summary(ej, t, s)
-
-        payload = {"title": t, "summary": s, "editorjs": ej, **ctx}
-        return payload
-    except Exception as e:
-        log.exception("[tool:generate_or_update_slides] failed")
-        # even on failure, return a minimal doc so UI persists something sensible
-        base_title = (title or "Presentation")
-        base_summary = (summary or "")
-        return {"title": base_title, "summary": base_summary, "editorjs": minimal_editorjs(base_title, base_summary), **ctx}
-
+        msg = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
+        raw = (getattr(msg, "content", "") or "").strip()
+        data = json.loads(raw)
+        name = str(data.get("name", "Joy")).title()
+        inten = int(data.get("intensity", 1))
+        if name not in ("Joy", "Anger", "Sadness", "Surprise"):
+            name = "Joy"
+        if inten < 1 or inten > 3:
+            inten = 1
+        return {"name": name, "intensity": inten}
+    except Exception:
+        return {"name": "Joy", "intensity": 1}
 
 # =============================================================================
 # Registry & OpenAI tool schemas
 # =============================================================================
 AGENT_TOOLS: Dict[str, Any] = {
     "search_wikipedia": search_wikipedia,
+    "fetch_latest_slides": fetch_latest_slides,
     "generate_or_update_slides": generate_or_update_slides,
+    "emotion_analyze": emotion_analyze,
 }
 
-# IMPORTANT: plain list (no trailing comma!)
 TOOLS_SCHEMA = [convert_to_openai_tool(t) for t in AGENT_TOOLS.values()]

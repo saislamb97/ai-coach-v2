@@ -21,7 +21,6 @@ class PrettyMixin:
         t = (text or "").strip()
         if len(t) > limit:
             t = t[:limit].rstrip() + "…"
-        # format_html() protects against unsafe HTML in t
         return format_html("{}", t)
 
     @staticmethod
@@ -42,23 +41,13 @@ class PrettyMixin:
 # ==========================================================
 @admin.register(Session)
 class SessionAdmin(admin.ModelAdmin):
-    """
-    Admin for conversation sessions. Replaces VisitorAdmin.
-    """
-
+    """Admin for conversation sessions."""
     date_hierarchy = "created_at"
     ordering = ("-updated_at",)
     list_select_related = ("user", "agent")
     list_per_page = 25
 
-    list_display = (
-        "thread_id",
-        "user",
-        "agent",
-        "title",
-        "is_active",
-        "updated_at",
-    )
+    list_display = ("thread_id", "user", "agent", "title", "is_active", "updated_at")
     list_filter = ("agent", "user", "is_active", "created_at")
     search_fields = ("thread_id", "title", "summary")
 
@@ -70,51 +59,27 @@ class SessionAdmin(admin.ModelAdmin):
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
 
-    def __str__(self):
-        return self.thread_id
-
 
 # ==========================================================
 # Chat
 # ==========================================================
 @admin.register(Chat)
 class ChatAdmin(PrettyMixin, admin.ModelAdmin):
-    """
-    Admin for individual chat turns inside a session.
-    """
-
+    """Admin for individual chat turns inside a session."""
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
     list_select_related = ("session", "session__user", "session__agent")
     list_per_page = 25
 
-    list_display = (
-        "session_thread",
-        "agent_display",
-        "user_display",
-        "query_preview",
-        "created_at",
-    )
+    list_display = ("session_thread", "agent_display", "user_display", "query_preview", "created_at")
     list_filter = ("session__user", "session__agent", "created_at")
-    search_fields = (
-        "query",
-        "response",
-        "session__thread_id",
-        "session__title",
-        "session__summary",
-    )
+    search_fields = ("query", "response", "session__thread_id", "session__title", "session__summary")
 
     readonly_fields = (
-        "created_at",
-        "updated_at",
-        "session",
-        "agent_display",
-        "user_display",
-        "query_full",
-        "response_full",
-        "emotion_pretty",
-        "viseme_pretty",
-        "meta_pretty",
+        "created_at", "updated_at", "session",
+        "agent_display", "user_display",
+        "query_full", "response_full",
+        "emotion_pretty", "viseme_pretty", "meta_pretty",
     )
 
     fieldsets = (
@@ -126,7 +91,6 @@ class ChatAdmin(PrettyMixin, admin.ModelAdmin):
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
 
-    # ---- virtual columns / readonly renderers ----
     @admin.display(description="Thread")
     def session_thread(self, obj: Chat):
         return getattr(obj.session, "thread_id", "—")
@@ -173,32 +137,31 @@ class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
     Admin for the current slide deck attached to a session.
     One row per session (OneToOne).
     """
-
     date_hierarchy = "updated_at"
     ordering = ("-updated_at",)
     list_select_related = ("session", "session__user", "session__agent")
     list_per_page = 25
 
-    list_display = (
-        "session_thread",
-        "agent_display",
-        "user_display",
-        "title",
-        "updated_at",
-    )
+    list_display = ("session_thread", "agent_display", "user_display", "title", "version", "updated_by", "updated_at")
     list_filter = ("session__agent", "session__user", "updated_at", "created_at")
     search_fields = ("session__thread_id", "title", "summary")
 
-    readonly_fields = ("created_at", "updated_at", "session_pretty", "editorjs_pretty")
+    readonly_fields = (
+        "created_at", "updated_at",
+        "session_pretty",
+        "version",
+        "editorjs_pretty",
+        "previous_editorjs_pretty",
+    )
 
     fieldsets = (
         ("Session", {"fields": ("session_pretty",)}),
-        ("Slides Info", {"fields": ("title", "summary")}),
-        ("editor.js Document", {"fields": ("editorjs_pretty",)}),
+        ("Slides Info", {"fields": ("title", "summary", "version", "updated_by")}),
+        ("Current editor.js", {"fields": ("editorjs_pretty",)}),
+        ("Previous Snapshot", {"fields": ("previous_title", "previous_summary", "previous_editorjs_pretty")}),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
 
-    # ---- virtuals / readonly renders ----
     @admin.display(description="Thread")
     def session_thread(self, obj: Slides):
         return getattr(obj.session, "thread_id", "—")
@@ -231,6 +194,10 @@ class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
             summary=(sess.summary or "—"),
         )
 
-    @admin.display(description="editor.js (pretty)")
+    @admin.display(description="editor.js (pretty) — current")
     def editorjs_pretty(self, obj: Slides):
         return self._json_pretty(obj.editorjs, max_height=360)
+
+    @admin.display(description="editor.js (pretty) — previous")
+    def previous_editorjs_pretty(self, obj: Slides):
+        return self._json_pretty(obj.previous_editorjs, max_height=360)

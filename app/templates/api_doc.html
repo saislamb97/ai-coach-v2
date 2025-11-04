@@ -100,11 +100,11 @@
       <div class="not-prose my-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div class="rounded-xl border border-slate-200 bg-white p-3">
           <div class="text-xs uppercase tracking-wide text-slate-500">Version</div>
-          <div class="mt-1 font-semibold">1.0.0</div>
+          <div class="mt-1 font-semibold">1.1.0</div>
         </div>
         <div class="rounded-xl border border-slate-200 bg-white p-3">
           <div class="text-xs uppercase tracking-wide text-slate-500">Date</div>
-          <div class="mt-1 font-semibold">2025-10-30</div>
+          <div class="mt-1 font-semibold">2025-11-05</div>
         </div>
         <div class="rounded-xl border border-slate-200 bg-white p-3 lg:col-span-2">
           <div class="flex items-center justify-between">
@@ -161,7 +161,7 @@
       </div>
 
       <h2 id="overview">Overview</h2>
-      <p>This document focuses on the <strong>WebSocket</strong> API for AI Coach realtime chat (token + sentence streaming, optional TTS+visemes, slide updates). For the REST API, see the links in <a href="#api-docs">API Docs</a>.</p>
+      <p>This document focuses on the <strong>WebSocket</strong> API for AI Coach realtime chat (token + sentence streaming, optional TTS+visemes with timing, slide updates). For the REST API, see <a href="#api-docs">API Docs</a>.</p>
 
       <div class="not-prose my-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900">
         <div class="font-semibold">🔑 Requirements</div>
@@ -212,17 +212,51 @@
 
       <h2 id="ws-messages">Message Reference</h2>
 
+      <h3 id="event-cheatsheet">Event Cheat Sheet</h3>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[720px] w-full text-sm pdf-avoid-break">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Type</th>
+              <th class="px-4 py-3 font-semibold">Dir</th>
+              <th class="px-4 py-3 font-semibold">Payload (summary)</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-4 py-3 font-mono">connected</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ bot_id, thread_id }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_query</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Echo of user input <code>{ text, local_time }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_start</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Run begun</td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_token</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Raw token stream <code>{ token }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_sentence</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Finalized sentence <code>{ text, local_time, emotion? }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">emotion</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Standalone emotion update <code>{ emotion:{ name, intensity } }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">audio_muted</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ muted:boolean }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">audio_response</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">TTS chunk + visemes (see below)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_done</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Final timings <code>{ timings:{…} }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_ended</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Run cleanup marker</td></tr>
+            <tr><td class="px-4 py-3 font-mono">slides_response</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ slides:{…} } | { slides_raw:{…} }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">slides_done</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">No more slide updates for run</td></tr>
+            <tr><td class="px-4 py-3 font-mono">stop_audio</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Server ack / cancellation notice</td></tr>
+            <tr><td class="px-4 py-3 font-mono">error</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ message }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">ping</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Liveness check</td></tr>
+            <tr><td class="px-4 py-3 font-mono">pong</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Ping reply</td></tr>
+            <tr><td class="px-4 py-3 font-mono">mute_audio / unmute_audio</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Toggle TTS streaming</td></tr>
+            <tr><td class="px-4 py-3 font-mono">stop_audio</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Stop further <span class="font-mono">audio_response</span> chunks</td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_query / audio_query</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Start a run (see payloads below)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h3 id="client-to-server">Client → Server</h3>
       <pre><code class="language-json">{
   "type": "text_query",
   "text": "Hello there",
-  "local_time": "2025-10-30 10:00:00",
+  "local_time": "2025-11-05 10:00:00",
   "muteAudio": false
 }
 {
   "type": "audio_query",
-  "audio": "data:audio/webm;base64,AAAA…",
-  "format": "webm",
+  "audio": "data:audio/webm;base64,AAAA…",  // or plain base64
+  "format": "webm",                          // hint when not a data URL: webm|wav|m4a|ogg|mp3
   "muteAudio": true
 }
 { "type": "mute_audio" }
@@ -239,32 +273,100 @@
       </ul>
 
       <h3 id="server-to-client">Server → Client</h3>
-      <ul>
-        <li><code>connected</code> — handshake info: <code>{ bot_id, thread_id }</code></li>
-        <li><code>text_query</code> — echo of user message <em>(with <code>local_time</code>)</em></li>
-        <li><code>response_start</code> → <code>text_token</code>* → <code>text_sentence</code>* → <code>response_done</code> → <code>response_ended</code></li>
-        <li><code>audio_muted</code> — <code>{ muted: boolean }</code></li>
-        <li><code>audio_response</code> — <code>{ audio: base64, viseme: number[][], local_time }</code></li>
-        <li><code>slides_response</code> — <code>{ slides: { title, summary, editorjs }, local_time }</code></li>
-        <li><code>slides_done</code> — end-of-slides marker</li>
-        <li><code>stop_audio</code> — confirmation</li>
-        <li><code>pong</code> — ping reply</li>
-        <li><code>error</code> — <code>{ message }</code></li>
-      </ul>
+      <p>Typical sequence: <code>response_start</code> → <code>text_token*</code> / <code>text_sentence*</code> / <code>audio_response*</code> → <code>response_done</code> → <code>response_ended</code></p>
 
-      <p><em>*Streaming:</em> <code>text_token</code> carries raw tokens; <code>text_sentence</code> emits finalized sentences with optional emotion:</p>
+      <h4 id="text-streaming">Text streaming</h4>
+      <pre><code class="language-json">{"type":"text_token","token":"Let"}
+{"type":"text_token","token":"'s "}
+{"type":"text_sentence",
+ "text":"Let's start with a simple plan.",
+ "emotion":{ "items":[{"name":"Joy","intensity":2}] },
+ "local_time":"2025-11-05 10:00:02"}
+{"type":"emotion","emotion":{"name":"Joy","intensity":2}}</code></pre>
+      <p><strong>Emotion</strong> can arrive either embedded in <code>text_sentence</code> (legacy/back-compat) or as a standalone <code>emotion</code> event. Use whichever you receive.</p>
+
+      <h4 id="audio-response">Audio + viseme streaming</h4>
+      <p>The server sends TTS audio with synchronized visemes. Visemes are 15-length frames in either ARKit or OVR layout.</p>
+
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[720px] w-full text-sm pdf-avoid-break">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Field</th>
+              <th class="px-4 py-3 font-semibold">Type</th>
+              <th class="px-4 py-3 font-semibold">Notes</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="px-4 py-3 font-mono">audio</td>
+              <td class="px-4 py-3">string</td>
+              <td class="px-4 py-3">Data URL (<code>data:audio/&lt;mime&gt;;base64,…</code>) or base64</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-mono">viseme</td>
+              <td class="px-4 py-3">array OR object</td>
+              <td class="px-4 py-3">
+                Either raw frames <code>number[ ][15]</code>, or<br/>
+                <code>{ frames:number[ ][15], times?:number[ ], fps?:number }</code>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-mono">viseme_format</td>
+              <td class="px-4 py-3">string</td>
+              <td class="px-4 py-3"><code>"arkit15"</code> (default) or <code>"ovr15"</code></td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-mono">viseme_times</td>
+              <td class="px-4 py-3">number[ ] (sec)</td>
+              <td class="px-4 py-3">Optional. Per-frame timestamps; preferred for perfect sync.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-mono">viseme_fps</td>
+              <td class="px-4 py-3">number</td>
+              <td class="px-4 py-3">Optional. Used to derive times if <span class="font-mono">viseme_times</span> are absent.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-mono">local_time</td>
+              <td class="px-4 py-3">string</td>
+              <td class="px-4 py-3">Client-local echo, informative only.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Examples:</p>
       <pre><code class="language-json">{
-  "type": "text_sentence",
-  "text": "Let's start with a simple plan.",
-  "emotion": {
-    "items": [
-      {"name":"Joy","intensity":2},
-      {"name":"Anger","intensity":1},
-      {"name":"Sadness","intensity":1}
-    ]
-  },
-  "local_time": "2025-10-30 10:00:02"
+  "type":"audio_response",
+  "audio":"data:audio/webm;base64,AAAA...",
+  "viseme_format":"arkit15",
+  "viseme":[[0,0,0,0,0,0,0,0,0,0,1,0,0,0,0], ...],
+  "local_time":"2025-11-05 10:00:03"
+}
+{
+  "type":"audio_response",
+  "audio":"&lt;base64-only&gt;",
+  "viseme_format":"ovr15",
+  "viseme":{"frames":[[0,0,0,0,0,0,0,0,0,0,1,0,0,0,0], ...], "fps":30}
+}
+{
+  "type":"audio_response",
+  "audio":"&lt;base64-or-data-url&gt;",
+  "viseme_format":"arkit15",
+  "viseme":{"frames":[...], "times":[0.00,0.033,0.067,...]}
 }</code></pre>
+
+      <h4 id="slides-events">Slides events</h4>
+      <pre><code class="language-json">{
+  "type":"slides_response",
+  "slides": { "title":"Week Plan", "summary":"...", "editorjs": { /* ... */ } },
+  "local_time":"2025-11-05 10:00:05"
+}
+{
+  "type":"slides_response",
+  "slides_raw": { /* provider-native raw format when editorjs is not available */ }
+}
+{"type":"slides_done"}</code></pre>
 
       <h3 id="timings-payload">Timings Payload</h3>
       <pre><code class="language-json">{
@@ -295,6 +397,7 @@ url.searchParams.set("website_language", "en");
 url.searchParams.set("api_key", "&lt;YOUR_API_KEY&gt;");
 
 const ws = new WebSocket(url);
+
 ws.onopen = () => {
   ws.send(JSON.stringify({
     type: "text_query",
@@ -303,11 +406,27 @@ ws.onopen = () => {
     muteAudio: false
   }));
 };
+
 ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
-  if (msg.type === "text_token")   {/* render tokens */}
-  if (msg.type === "text_sentence"){/* render sentence + emotion */}
-  if (msg.type === "audio_response"){/* queue/play base64 audio */}
+
+  if (msg.type === "text_token") {
+    // render raw tokens
+  }
+
+  if (msg.type === "text_sentence") {
+    // render final sentence; optional msg.emotion.items
+  }
+
+  if (msg.type === "emotion") {
+    // standalone emotion update: msg.emotion = { name, intensity }
+  }
+
+  if (msg.type === "audio_response") {
+    // msg.audio (data URL or base64)
+    // msg.viseme can be an array (frames) or object {frames,times?,fps?}
+    // msg.viseme_format: "arkit15" | "ovr15"
+  }
 };</code></pre>
 
       <h3 id="example-python">Python (websockets)</h3>
@@ -320,7 +439,7 @@ THR = "user_ab12cd34ef56gh78"
 async def main():
     url = f"wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id={BOT}&thread_id={THR}&website_language=en"
     async with websockets.connect(url, extra_headers={"Authorization": f"Api-Key {API}"}) as ws:
-        await ws.send(json.dumps({"type":"text_query","text":"Plan my week","local_time":"2025-10-30 10:00:00","muteAudio":True}))
+        await ws.send(json.dumps({"type":"text_query","text":"Plan my week","local_time":"2025-11-05 10:00:00","muteAudio":True}))
         async for raw in ws:
             msg = json.loads(raw)
             print(msg)
@@ -330,8 +449,9 @@ asyncio.run(main())</code></pre>
       <h2 id="audio-payload">Audio Payload Tips</h2>
       <ul>
         <li>Send <code>data:audio/&lt;mime&gt;;base64,....</code> (recommended) or plain base64 + <code>format</code> hint.</li>
-        <li>Server will infer extension from the data URL or <code>format</code> (<code>wav/m4a/ogg/webm/mp3</code>).</li>
-        <li>On playback, consider queueing chunks and handling user mute/stop actions.</li>
+        <li>Server infers extension from data URL or <code>format</code> (<code>wav/m4a/ogg/webm/mp3</code>).</li>
+        <li>For lip-sync quality, prefer <strong><code>viseme_times</code></strong> (seconds). If unavailable, provide <strong><code>viseme_fps</code></strong>. Clients should interpolate between frames.</li>
+        <li>On playback, queue chunks and honor <code>mute_audio</code>/<code>stop_audio</code> immediately.</li>
       </ul>
     </article>
   </main>
@@ -409,7 +529,7 @@ asyncio.run(main())</code></pre>
       };
 
       const title = 'AI Coach — Realtime Chat (WebSocket)';
-      const date  = '2025-10-30';
+      const date  = '2025-11-05';
 
       html2pdf().set(opt).from(element).toPdf().get('pdf').then(pdf => {
         const pageCount = pdf.internal.getNumberOfPages();

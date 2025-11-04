@@ -1,8 +1,9 @@
+# app/engine/nodes.py
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import TypedDict, List, Dict, Any, Optional, Tuple
@@ -12,8 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 
 from agent.models import Agent
-from memory.models import Session
-
+from memory.models import Session, Slides
 from .tokens import TokenLimits
 from .utils import extract_sentences, build_text_system_prompt
 from .tools import AGENT_TOOLS, TOOLS_SCHEMA, set_tool_context
@@ -36,19 +36,25 @@ class Settings:
     poll_interval_s: float = 0.5
     max_tool_calls: int = 6
 
-    assembly_reserved_tokens: int = 3000
-
+    # Emotion tool
     emotion_model: str = "gpt-4o-mini"
-    emotion_temperature: float = 0.0
     emotion_timeout_s: float = 6.0
-    emotion_retries: int = 2
 
-    viseme_max_frames_to_store: int = 1500
+    # Viseme aggregation
+    viseme_max_frames_to_store: int = 4000
+
+    # Viseme timing (frame period in ms; e.g., 24 FPS -> ~41.7 ms)
+    vis_fps_env: int = int(os.getenv("VIS_FPS", "24"))
 
 S = Settings()
+FRAME_MS = max(10, int(round(1000.0 / max(1, S.vis_fps_env))))
+
+# Force primary DB for read-after-write
+DB_PRIMARY = os.getenv("DB_PRIMARY_ALIAS", "default")
+
 
 # =============================================================================
-# Shared State
+# State
 # =============================================================================
 class QAState(TypedDict, total=False):
     bot_id: str
@@ -65,24 +71,122 @@ class QAState(TypedDict, total=False):
     base_msgs: List[BaseMessage]
     user_msg: HumanMessage
 
-    tools_started: List[Dict[str, Any]]
-    slides_latest: Dict[str, Any]
+    # async plumbing
+    text_finalized_event: asyncio.Event
+    slides_ready_event: asyncio.Event  # gate text start on slides readiness
+
+    # Slides / tools
+    slides_latest: Dict[str, Any]      # snapshot dict (after fetch or persist)
+    slides_tool_used: bool
+    slides_not_found: bool
+    slides_write_persisted: bool
+
     response: str
 
-    emotion_state: Dict[str, Any]
-    viseme_state: Dict[str, Any]
+    # Final single emotion result (no arrays)
+    emotion_final: Dict[str, Any]
 
-    slides_outline_text: str
+    # Viseme aggregation across sentences
+    viseme_frames: List[List[float]]
+
+    # Per-turn slides context for generation (when tools used)
+    turn_slides_context: str
 
     meta: Dict[str, Any]
     timings: Dict[str, int]
 
+
 # =============================================================================
-# DB helpers
+# Small helpers
 # =============================================================================
 def _elapsed_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
+
+def _flatten_editorjs_for_prompt(editorjs: Dict[str, Any], *, limit_blocks: int = 80) -> List[str]:
+    if not isinstance(editorjs, dict):
+        return []
+    blocks = editorjs.get("blocks") or []
+    lines: List[str] = []
+    for b in blocks[:limit_blocks]:
+        t = (b.get("type") or "").lower()
+        d = b.get("data") or {}
+        if t == "header":
+            txt = (d.get("text") or "").strip()
+            if txt:
+                lines.append(f"# {txt}")
+        elif t == "paragraph":
+            txt = (d.get("text") or "").strip()
+            if txt:
+                lines.append(txt)
+        elif t == "list":
+            items = d.get("items") or []
+            for it in items[:8]:
+                s = str(it).strip()
+                if s:
+                    lines.append(f"- {s}")
+    return lines
+
+
+def _build_context_from_snapshot(snap: Dict[str, Any]) -> str:
+    """Produce a compact, read-only textual context of current + previous slides."""
+    title = snap.get("title") or ""
+    summary = snap.get("summary") or ""
+    editorjs = snap.get("editorjs") or {}
+    prev = snap.get("previous") or {}
+    prev_title = prev.get("title") or ""
+    prev_summary = prev.get("summary") or ""
+    prev_ej = prev.get("editorjs") or {}
+
+    # NEW: helpful meta for grounding
+    version = snap.get("version")
+    updated_by = snap.get("updated_by") or ""
+    updated_at = snap.get("updated_at") or ""
+
+    parts: List[str] = []
+    parts.append("## Slides Snapshot (use ONLY this; ignore earlier chat mentions of slides)")
+    parts.append(f"Version: {version}  |  Updated by: {updated_by}  |  Updated at: {updated_at}")
+    parts.append(f"Title: {title}")
+    if summary:
+        parts.append(f"Summary: {summary}")
+    parts.extend(_flatten_editorjs_for_prompt(editorjs))
+
+    parts.append("\n## Previous Snapshot")
+    parts.append(f"Prev Title: {prev_title}")
+    if prev_summary:
+        parts.append(f"Prev Summary: {prev_summary}")
+    parts.extend(_flatten_editorjs_for_prompt(prev_ej))
+
+    # NEW: explicit header diff (added/removed/unchanged) to drive change logs
+    diff = snap.get("diff_headers") or {}
+    if diff:
+        parts.append("\n## Header Diff")
+        if diff.get("added"):
+            parts.append("Added: " + "; ".join(diff["added"][:8]))
+        if diff.get("removed"):
+            parts.append("Removed: " + "; ".join(diff["removed"][:8]))
+        if diff.get("unchanged"):
+            parts.append("Unchanged: " + "; ".join(diff["unchanged"][:8]))
+
+    out = "\n".join(parts)
+    return out[:8000] + ("\n…" if len(out) > 8000 else "")
+
+
+def _is_meaningful(title: Any, summary: Any, editorjs: Any) -> bool:
+    def _empty_str(s: Any) -> bool:
+        if not isinstance(s, str):
+            return True
+        v = s.strip().lower()
+        return v == "" or v in {"string", "null", "none"}
+    has_title = isinstance(title, str) and not _empty_str(title)
+    has_summary = isinstance(summary, str) and not _empty_str(summary)
+    has_blocks = isinstance(editorjs, dict) and bool(editorjs.get("blocks"))
+    return has_title or has_summary or has_blocks
+
+
+# =============================================================================
+# DB helpers
+# =============================================================================
 @sync_to_async
 def _get_agent_and_session(bot_id: str, thread_id: str) -> tuple[Agent, Session]:
     agent = (
@@ -93,6 +197,8 @@ def _get_agent_and_session(bot_id: str, thread_id: str) -> tuple[Agent, Session]
     )
     if not agent:
         raise RuntimeError("Agent not found")
+
+    # do NOT select_related("slides") to avoid stale relation cache
     session = (
         Session.objects
         .filter(thread_id=thread_id, agent_id=agent.id, is_active=True)
@@ -103,12 +209,14 @@ def _get_agent_and_session(bot_id: str, thread_id: str) -> tuple[Agent, Session]
         raise RuntimeError("Session not found for thread_id")
     return agent, session
 
+
 @sync_to_async
 def _fetch_history_pairs(session_id: int, limit: int) -> List[Tuple[str, str]]:
     from memory.models import Chat
     qs = Chat.objects.filter(session_id=session_id).order_by("-created_at")[:limit]
     items = list(qs)[::-1]
     return [(c.query or "", c.response or "") for c in items]
+
 
 @sync_to_async
 def _persist_chat(
@@ -130,165 +238,78 @@ def _persist_chat(
         meta=meta or {},
     )
 
+
 @sync_to_async
-def _upsert_slides(session: Session, slides_payload: Dict[str, Any]) -> Dict[str, Any]:
-    from memory.models import Slides
-    if not isinstance(slides_payload, dict) or not isinstance(slides_payload.get("editorjs"), dict):
-        return {}
-    s, _ = Slides.objects.get_or_create(session=session)
-    s.title = str(slides_payload.get("title") or "")
-    s.summary = str(slides_payload.get("summary") or "")
-    s.editorjs = slides_payload["editorjs"]
-    s.save(update_fields=["title", "summary", "editorjs", "updated_at"])
+def _rotate_and_save_slides(session: Session, payload: Dict[str, Any], *, updated_by: str = "tool:slides") -> Dict[str, Any]:
+    """
+    Persist current + previous using Slides.rotate_and_update.
+    Skip creation/rotation if nothing meaningful.
+    Always hit primary and invalidate relation cache.
+    """
+    s = (
+        Slides.objects.using(DB_PRIMARY)
+        .filter(session=session)
+        .first()
+    )
+
+    title = str(payload.get("title") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    editorjs = payload.get("editorjs") or {}
+
+    # NOOP: nothing meaningful → do not create or rotate
+    if not _is_meaningful(title, summary, editorjs):
+        if not s:
+            return {}
+        s.refresh_from_db(using=DB_PRIMARY)
+        return {
+            "title": s.title,
+            "summary": s.summary,
+            "editorjs": s.editorjs,
+            "previous": {
+                "title": s.previous_title,
+                "summary": s.previous_summary,
+                "editorjs": s.previous_editorjs,
+            },
+            "version": s.version,
+            "thread_id": session.thread_id,
+            "updated_by": s.updated_by,
+            "updated_at": s.updated_at.isoformat(),
+        }
+
+    if not s:
+        s = Slides.objects.using(DB_PRIMARY).create(session=session)
+
+    # Rotate correctly: old -> previous_*, new -> current
+    s.rotate_and_update(title=title, summary=summary, editorjs=editorjs, updated_by=updated_by)
+    s.save(update_fields=[
+        "previous_title", "previous_summary", "previous_editorjs",
+        "title", "summary", "editorjs", "updated_by", "version", "updated_at"
+    ])
+
+    # ensure we return the committed, freshest row
+    s.refresh_from_db(using=DB_PRIMARY)
+
+    # Invalidate relation cache if it was populated on this Session instance
+    try:
+        delattr(session, "slides")
+    except Exception:
+        pass
+
     return {
         "title": s.title,
         "summary": s.summary,
         "editorjs": s.editorjs,
-        "updated_at": s.updated_at,
-        "thread_id": session.thread_id,
-    }
-
-@sync_to_async
-def _get_latest_slides_outline(session: Session) -> str:
-    from memory.models import Slides
-    s = Slides.objects.filter(session=session).first()
-    if not s or not isinstance(getattr(s, "editorjs", None), dict):
-        return ""
-    ej = s.editorjs or {}
-    blocks = ej.get("blocks") or []
-    headers: List[str] = []
-    for b in blocks:
-        if (b.get("type") or "").lower() == "header":
-            t = (b.get("data", {}).get("text") or "").strip()
-            if t:
-                headers.append(t)
-        if len(headers) >= 12:
-            break
-    title = (s.title or "").strip()
-    summary = (s.summary or "").strip()
-    lines = []
-    if title:
-        lines.append(f"Title: {title}")
-    if summary:
-        lines.append(f"Summary: {summary}")
-    if headers:
-        lines.append("Sections:")
-        lines.extend([f"- {h}" for h in headers])
-    return "\n".join(lines)
-
-# =============================================================================
-# Emotion & Viseme helpers
-# =============================================================================
-def _emotion_state_init() -> Dict[str, Any]:
-    # Track dominant counts + avg intensity for that label, plus the last item
-    return {
-        "count": 0,
-        "hist": {"Joy": 0, "Anger": 0, "Sadness": 0},
-        "sum_intensity": {"Joy": 0, "Anger": 0, "Sadness": 0},
-        "last": {"name": "Joy", "intensity": 1},
-        "items": [],  # recent single-item samples, capped to 20
-    }
-
-def _emotion_state_update(state: Dict[str, Any], emo: Dict[str, Any]) -> None:
-    """
-    Accepts emotion dicts in a flexible shape and normalizes them to ONE item:
-      - {"items":[{"name":"Joy","intensity":2}]}
-      - {"item":{"name":"Joy","intensity":2}}
-      - {"name":"Joy","intensity":2}
-      - legacy: {"items":[{Joy},{Anger},{Sadness}]}
-    """
-    try:
-        def _clamp(v: Any) -> int:
-            try:
-                n = int(v)
-            except Exception:
-                n = 1
-            return 1 if n < 1 else 3 if n > 3 else n
-
-        # pick a single best item from various shapes
-        item = None
-        if isinstance(emo, dict):
-            if isinstance(emo.get("item"), dict):
-                item = emo["item"]
-            elif isinstance(emo.get("items"), list):
-                items = [i for i in emo["items"] if isinstance(i, dict)]
-                if len(items) == 1:
-                    item = items[0]
-                elif len(items) >= 3:
-                    # legacy 3-item payload → choose max intensity; tie-break Joy > Anger > Sadness
-                    order = {"Joy": 3, "Anger": 2, "Sadness": 1}
-                    best = None
-                    for it in items:
-                        nm = str(it.get("name", "")).title()
-                        iv = _clamp(it.get("intensity", 1))
-                        if nm not in ("Joy", "Anger", "Sadness"):
-                            continue
-                        if (best is None or iv > best[1] or (iv == best[1] and order.get(nm, 0) > order.get(best[0], 0))):
-                            best = (nm, iv)
-                    if best:
-                        item = {"name": best[0], "intensity": best[1]}
-            elif "name" in emo and "intensity" in emo:
-                item = {"name": str(emo["name"]).title(), "intensity": _clamp(emo["intensity"])}
-
-        if not item:
-            item = {"name": "Joy", "intensity": 1}
-
-        name = str(item.get("name", "Joy")).title()
-        if name not in ("Joy", "Anger", "Sadness"):
-            name = "Joy"
-        inten = _clamp(item.get("intensity", 1))
-
-        state["count"] = int(state.get("count", 0)) + 1
-        state["hist"][name] = int(state["hist"].get(name, 0)) + 1
-        state["sum_intensity"][name] = int(state["sum_intensity"].get(name, 0)) + inten
-        state["last"] = {"name": name, "intensity": inten}
-        state["items"].append(state["last"].copy())
-        if len(state["items"]) > 20:
-            state["items"].pop(0)
-    except Exception:
-        pass
-
-def _emotion_state_finalize(state: Dict[str, Any]) -> Dict[str, Any]:
-    # Choose the most frequent emotion as the final one; average its intensity.
-    hist = {k: int(v) for k, v in (state.get("hist") or {}).items()}
-    sums = {k: int(v) for k, v in (state.get("sum_intensity") or {}).items()}
-    if not hist:
-        hist = {"Joy": 1, "Anger": 0, "Sadness": 0}
-        sums = {"Joy": 1, "Anger": 0, "Sadness": 0}
-
-    # tie-break Joy > Anger > Sadness
-    order = {"Joy": 3, "Anger": 2, "Sadness": 1}
-    best = max(hist.items(), key=lambda kv: (kv[1], order.get(kv[0], 0)))[0]
-    cnt = max(1, hist.get(best, 0))
-    avg_int = min(3, max(1, round(sums.get(best, 1) / cnt)))
-
-    return {
-        "items": [{"name": best, "intensity": int(avg_int)}],  # <= single-item final emotion
-        "stats": {
-            "count": int(state.get("count", 0)),
-            "hist": hist,
-            "last": state.get("last", {"name": "Joy", "intensity": 1}),
+        "previous": {
+            "title": s.previous_title,
+            "summary": s.previous_summary,
+            "editorjs": s.previous_editorjs,
         },
+        "version": s.version,
+        "thread_id": session.thread_id,
+        "updated_by": s.updated_by,
+        "updated_at": s.updated_at.isoformat(),
     }
 
-def _viseme_state_init() -> Dict[str, Any]:
-    return {"segments": 0, "frames_total": 0, "last_frames": []}
-
-def _viseme_state_update(state: Dict[str, Any], frames: List[List[float]]) -> None:
-    try:
-        n = len(frames or [])
-        state["segments"] = int(state.get("segments", 0)) + 1
-        state["frames_total"] = int(state.get("frames_total", 0)) + n
-        state["last_frames"] = frames[-S.viseme_max_frames_to_store:] if n > S.viseme_max_frames_to_store else frames
-    except Exception:
-        pass
-
-def _viseme_state_finalize(state: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "segments": int(state.get("segments", 0)),
-        "frames_total": int(state.get("frames_total", 0)),
-        "last_frames": state.get("last_frames", []),
-    }
 
 # =============================================================================
 # Prepare
@@ -307,26 +328,31 @@ async def n_prepare(state: QAState) -> QAState:
     state["base_msgs"] = base_msgs
     state["user_msg"] = HumanMessage(content=(state.get("query") or "").strip())
 
-    try:
-        state["slides_outline_text"] = await _get_latest_slides_outline(session)
-    except Exception:
-        state["slides_outline_text"] = ""
-
-    state["tools_started"] = []
     state["slides_latest"] = {}
-    state["emotion_state"] = _emotion_state_init()
-    state["viseme_state"] = _viseme_state_init()
+    state["slides_tool_used"] = False
+    state["slides_not_found"] = False
+    state["slides_write_persisted"] = False
+
+    state["emotion_final"] = {}
+    state["viseme_frames"] = []
+    state["turn_slides_context"] = ""
+
     state["meta"] = {}
     state["timings"] = {"prepare_ms": _elapsed_ms(t0)}
+    state["text_finalized_event"] = asyncio.Event()
+    state["slides_ready_event"] = asyncio.Event()
     return state
 
+
 # =============================================================================
-# Tools planner/executor (synchronous deck generation; no polling)
+# Tools planner/executor (non-blocking)
 # =============================================================================
 async def _tool_router_and_stream(state: QAState):
     """
-    Runs independently of the text stream.
-    The LLM decides when/if to call tools. Slide tool is synchronous.
+    Decide tools and, if slides change, persist and build a fresh slides snapshot
+    BEFORE text generation starts (we gate on slides_ready_event).
+    IMPORTANT: To avoid bias from long chat history, we route with ONLY the user's
+    current message + a strict tool policy system message.
     """
     router = ChatOpenAI(model=(state.get("model") or "gpt-4o-mini"), temperature=S.router_temperature)
 
@@ -338,25 +364,26 @@ async def _tool_router_and_stream(state: QAState):
 
     planner_msgs: List[BaseMessage] = [
         SystemMessage(content=(
-            "You can call tools to fetch facts or manage slides for THIS session.\n"
-            "## Tools available\n"
-            "1) search_wikipedia(query: string)\n"
-            "   - Returns a brief 1–2 sentence summary.\n"
-            "2) generate_or_update_slides(editorjs?, [title], [summary], ai_enrich, max_sections)\n"
-            "   - Create or update a deck in Editor.js synchronously.\n"
-            "## Mandates\n"
-            "- NEVER include slide JSON in assistant text.\n"
-            "- If the user asks for a presentation, slides, deck, PPT, or Keynote, "
-            "  you MUST call generate_or_update_slides with ai_enrich=true.\n"
-            "- If no editorjs provided, create a minimal deck from title/summary."
+            "You may call tools for THIS session.\n"
+            "Tools:\n"
+            "  • fetch_latest_slides()  — READ-ONLY. Use for any request to view/check/show/summarize/compare slides,\n"
+            "    or phrases like: latest, current, what changed, recent changes, update status, diff.\n"
+            "  • generate_or_update_slides(editorjs?, title?, summary?, ai_enrich, max_sections) — WRITE. "
+            "    Call this ONLY if the user explicitly asks to create/generate/update/edit the slides.\n"
+            "  • search_wikipedia(query)\n"
+            "HARD RULES:\n"
+            "  1) Do NOT call generate_or_update_slides unless the user explicitly asks to create or update slides.\n"
+            "  2) If the user asks for latest/current changes or to show/compare the deck, call fetch_latest_slides.\n"
+            "  3) Never include slide JSON in assistant text.\n"
         )),
-        *state["base_msgs"][-6:],
-        state["user_msg"],
+
+        state["user_msg"],  # intentionally exclude chat history here
     ]
 
+    tools_schema = TOOLS_SCHEMA  # expose all tools; instruction above governs usage
     tool_calls: List[Dict[str, Any]] = []
     try:
-        ai = await router.ainvoke(planner_msgs, tools=TOOLS_SCHEMA, tool_choice="auto")
+        ai = await router.ainvoke(planner_msgs, tools=tools_schema, tool_choice="auto")
         tool_calls = (getattr(ai, "tool_calls", []) or [])[: S.max_tool_calls]
     except Exception:
         log.exception("[nodes:tool_router] router failed")
@@ -368,75 +395,121 @@ async def _tool_router_and_stream(state: QAState):
         impl = AGENT_TOOLS.get(name)
         if not impl:
             return
+
         try:
             if name == "generate_or_update_slides":
+                # Ensure sane defaults for enrichment; actual persistence happens below.
                 args.setdefault("ai_enrich", True)
                 args.setdefault("max_sections", 6)
+
             res = await impl.ainvoke(args)
         except Exception:
             log.exception("[nodes:tool_call] %s failed", name)
             return
 
-        if name == "generate_or_update_slides":
-            # Tool returns the payload directly (no status/job_id).
-            data = res.get("data") if isinstance(res, dict) and "data" in res else res
-            payload = {
-                "title": (data or {}).get("title") or "",
-                "summary": (data or {}).get("summary") or "",
-                "editorjs": (data or {}).get("editorjs") or {},
-            }
-            state["slides_latest"] = payload
-            if state.get("queue"):
-                await state["queue"].put({"type": "slides_response", "slides": payload})
-                await state["queue"].put({"type": "slides_done"})
+        # READ
+        if name == "fetch_latest_slides":
+            state["slides_tool_used"] = True
+            if (res or {}).get("status") == "ok":
+                snap = res.get("slides") or {}
+                state["slides_latest"] = snap
+                if state.get("queue"):
+                    await state["queue"].put({"type": "slides_response", "slides": snap})
+                    await state["queue"].put({"type": "slides_done"})
+            elif (res or {}).get("status") == "not_found":
+                state["slides_not_found"] = True
+                if state.get("queue"):
+                    await state["queue"].put({"type": "slides_response", "slides": {}})
+                    await state["queue"].put({"type": "slides_done"})
 
-    # Execute planned calls
+        # WRITE (persist immediately, because the user explicitly asked)
+        elif name == "generate_or_update_slides":
+            state["slides_tool_used"] = True
+            if res.get("no_write"):
+                # no meaningful input; nothing to persist
+                state["slides_write_persisted"] = False
+                return
+            try:
+                persisted = await _rotate_and_save_slides(state["session"], res, updated_by="user")
+                if persisted:
+                    state["slides_latest"] = persisted
+                    state["slides_write_persisted"] = True
+                    # notify websocket clients with the fresh snapshot
+                    if state.get("queue"):
+                        await state["queue"].put({"type": "slides_response", "slides": persisted})
+                        await state["queue"].put({"type": "slides_done"})
+            except Exception:
+                log.exception("[nodes:slides] persist failed")
+                state["slides_write_persisted"] = False
+
+    # Run selected tools concurrently
     await asyncio.gather(*(_exec_call(c) for c in tool_calls))
 
-    # Fallback: if the user clearly asked for slides and nothing was scheduled, run the tool once
-    if not tool_calls:
-        ask = (state.get("user_msg") or HumanMessage(content="")).content.lower()
-        if any(k in ask for k in ("slide", "slides", "deck", "presentation", "ppt", "powerpoint", "keynote")):
-            await _exec_call({
-                "name": "generate_or_update_slides",
-                "args": {
-                    "title": (state["agent"].name or "Presentation")[:80],
-                    "summary": (state.get("user_msg").content or "")[:160],
-                    "ai_enrich": True,
-                    "max_sections": 6,
-                }
-            })
+    # Build per-turn slides context ONLY from the latest snapshot (and only when a slide tool ran)
+    if state["slides_tool_used"] and state["slides_latest"]:
+        state["turn_slides_context"] = (
+            "Use ONLY the snapshot below for slides-related answers. "
+            "Ignore all earlier chat mentions about slides or titles. "
+            "Do NOT output slide JSON.\n\n" + _build_context_from_snapshot(state["slides_latest"])
+        )
+    elif state["slides_tool_used"] and state["slides_not_found"]:
+        state["turn_slides_context"] = "There are no slides for this session yet."
+    else:
+        state["turn_slides_context"] = ""
+
+    # signal: slides context is finalized for this turn
+    state["slides_ready_event"].set()
+
 
 # =============================================================================
-# Text streaming with sentence-level emotion + TTS (in-node)
+# Text streaming + sentence-level audio
 # =============================================================================
 async def _stream_text_with_audio(state: QAState):
+    # Wait (briefly) so that slides context reflects any update from tools
+    try:
+        await asyncio.wait_for(state["slides_ready_event"].wait(), timeout=1.5)
+    except Exception:
+        # proceed regardless
+        pass
+
     model_name = state.get("model") or "gpt-4o-mini"
     llm = ChatOpenAI(model=model_name, temperature=S.text_temperature, streaming=True)
 
-    utext = (state.get("user_msg") or HumanMessage(content="")).content.lower()
-    wants_slide_qa = any(k in utext for k in ("summarize", "summary", "explain", "suggest", "improve", "revise", "outline"))
-    slide_context = (state.get("slides_outline_text") or "").strip() if wants_slide_qa else ""
-    slide_context_msg: List[BaseMessage] = []
-    if slide_context:
-        slide_context_msg = [
-            SystemMessage(content=(
-                "You have a compact outline of the CURRENT deck (no JSON). "
-                "Use it to answer questions about the slides. Do NOT produce slide JSON.\n\n"
-                + slide_context
-            ))
-        ]
-
-    base: List[BaseMessage] = [
+    # Build messages. If slide tools were used this turn, DROP chat history to avoid bias.
+    msgs: List[BaseMessage] = [
         SystemMessage(content=build_text_system_prompt(
             bot_name=state["agent"].name or "Assistant",
             bot_id=str(state["agent"].bot_id),
             instruction=(state["agent"].persona or "").strip(),
-        )),
-        *slide_context_msg,
-        *state["base_msgs"],
-        state["user_msg"],
+        ))
     ]
+
+    if state["slides_tool_used"]:
+        # Guardrails so the model does not claim an update unless we actually persisted,
+        # and always produces a change log for "latest/what changed" style questions.
+        guard = (
+            "Slides policy for this turn:\n"
+            f"• slides_snapshot_available={str(bool(state.get('slides_latest'))).lower()}.\n"
+            f"• slides_write_persisted={str(bool(state.get('slides_write_persisted'))).lower()}.\n"
+            "• If the user asks for latest/current/what changed/update status/diff/compare:\n"
+            "    - Produce a concise change log using ONLY the snapshots below:\n"
+            "      • Title change: <previous> → <current> (only if different)\n"
+            "      • Summary: 'updated' if changed; else 'no change'\n"
+            "      • Sections added: list from 'Header Diff: Added'\n"
+            "      • Sections removed: list from 'Header Diff: Removed'\n"
+            "      • Unchanged topics: up to 3 from 'Header Diff: Unchanged'\n"
+            "    - Do NOT mention 'No changes were saved' for these read-only requests.\n"
+            "• Only say 'No changes were saved' when the user explicitly asked to create/update and slides_write_persisted=false.\n"
+            "• Never output Editor.js JSON. Use ONLY the snapshot content that follows."
+        )
+
+        if state.get("turn_slides_context"):
+            msgs.append(SystemMessage(content=guard + "\n\n" + state["turn_slides_context"]))
+        msgs.append(state["user_msg"])
+    else:
+        # Normal path: include chat history
+        msgs.extend(state["base_msgs"])
+        msgs.append(state["user_msg"])
 
     buf, final_text = "", ""
 
@@ -444,7 +517,7 @@ async def _stream_text_with_audio(state: QAState):
     voice_service = (getattr(voice, "service", "") or "").strip() if voice else ""
     voice_id = (getattr(voice, "voice_id", "") or "").strip() if voice else ""
 
-    async for chunk in llm.astream(base, tools=[], tool_choice="none"):
+    async for chunk in llm.astream(msgs, tools=[], tool_choice="none"):
         token = (getattr(chunk, "content", "") or "")
         if not token:
             continue
@@ -458,133 +531,104 @@ async def _stream_text_with_audio(state: QAState):
         sents, remainder = extract_sentences(buf)
         buf = remainder
 
-        for s in sents:
-            emo = await _classify_emotion(sentence=s, state=state)
-            _emotion_state_update(state["emotion_state"], emo)
-
-            if state.get("queue"):
-                await state["queue"].put({"type": "text_sentence", "text": s, "emotion": emo})
-
-            if voice_service and voice_id and state.get("queue"):
+        if voice_service and voice_id and state.get("queue"):
+            for s in sents:
                 try:
                     cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, s, "en_GB", SanitizeOptions())
                     audio, visemes = await synthesize_tts_async(cleaned, voice_service, voice_id)
                     import base64
                     b64 = base64.b64encode(audio).decode("utf-8")
-                    await state["queue"].put({"type": "audio_response", "audio": b64, "viseme": visemes})
-                    _viseme_state_update(state["viseme_state"], visemes)
+
+                    if visemes and visemes[0] != [0.0]*15:
+                        visemes = [[0.0]*15] + visemes
+                    if visemes and visemes[-1] != [0.0]*15:
+                        visemes = visemes + [[0.0]*15]
+
+                    # seconds since start for each viseme frame:
+                    times = [i * (FRAME_MS / 1000.0) for i in range(len(visemes))]
+                    fps = round(1000.0 / FRAME_MS, 3)
+
+                    await state["queue"].put({
+                        "type": "audio_response",
+                        "audio": b64,
+                        "viseme": visemes,
+                        "viseme_format": "arkit15",
+                        "viseme_times": times,     # precise sync
+                        "viseme_fps": fps          # also provide fps for sanity
+                    })
+
+                    if isinstance(visemes, list):
+                        state["viseme_frames"].extend(visemes)
+                        if len(state["viseme_frames"]) > S.viseme_max_frames_to_store:
+                            state["viseme_frames"] = state["viseme_frames"][-S.viseme_max_frames_to_store:]
                 except Exception:
                     log.exception("[nodes:tts] sentence TTS failed")
 
     tail = buf.strip()
-    if tail:
-        emo = await _classify_emotion(sentence=tail, state=state)
-        _emotion_state_update(state["emotion_state"], emo)
-        if state.get("queue"):
-            await state["queue"].put({"type": "text_sentence", "text": tail, "emotion": emo})
-        if voice_service and voice_id and state.get("queue"):
-            try:
-                cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, tail, "en_GB", SanitizeOptions())
-                audio, visemes = await synthesize_tts_async(cleaned, voice_service, voice_id)
-                import base64
-                b64 = base64.b64encode(audio).decode("utf-8")
-                await state["queue"].put({"type": "audio_response", "audio": b64, "viseme": visemes})
-                _viseme_state_update(state["viseme_state"], visemes)
-            except Exception:
-                log.exception("[nodes:tts] tail TTS failed")
+    if tail and voice_service and voice_id and state.get("queue"):
+        try:
+            cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, tail, "en_GB", SanitizeOptions())
+            audio, visemes = await synthesize_tts_async(cleaned, voice_service, voice_id)
+            import base64
+            b64 = base64.b64encode(audio).decode("utf-8")
+
+            if visemes and visemes[0] != [0.0]*15:
+                visemes = [[0.0]*15] + visemes
+            if visemes and visemes[-1] != [0.0]*15:
+                visemes = visemes + [[0.0]*15]
+
+            # seconds since start for each viseme frame:
+            times = [i * (FRAME_MS / 1000.0) for i in range(len(visemes))]
+            fps = round(1000.0 / FRAME_MS, 3)
+
+            await state["queue"].put({
+                "type": "audio_response",
+                "audio": b64,
+                "viseme": visemes,
+                "viseme_format": "arkit15",
+                "viseme_times": times,     # precise sync
+                "viseme_fps": fps          # also provide fps for sanity
+            })
+
+            if isinstance(visemes, list):
+                state["viseme_frames"].extend(visemes)
+                if len(state["viseme_frames"]) > S.viseme_max_frames_to_store:
+                    state["viseme_frames"] = state["viseme_frames"][-S.viseme_max_frames_to_store:]
+        except Exception:
+            log.exception("[nodes:tts] tail TTS failed")
 
     state["response"] = final_text
+    state["text_finalized_event"].set()
+
 
 # =============================================================================
-# Emotion classifier
+# Emotion (single result)
 # =============================================================================
-async def _classify_emotion(*, sentence: str, state: QAState) -> Dict[str, Any]:
-    """
-    Returns a SINGLE dominant emotion in the backward-compatible shape:
-      {"items":[{"name":"Joy"|"Anger"|"Sadness", "intensity": 1..3}]}
-    """
-    sys = (
-        "You are an emotion selector. Choose EXACTLY ONE best-matching emotion for the sentence.\n"
-        "Allowed names: Joy, Anger, Sadness. Intensity: integer 1..3 (1=low, 3=high).\n"
-        "Return STRICT JSON ONLY, no prose, exactly this shape:\n"
-        '{"items":[{"name":"Joy","intensity":2}]}\n'
-        "Always return a single-object array in `items`."
-    )
-    user = f"# Sentence\n{(sentence or '').strip()}"
-    attempt = 0
+async def _emit_emotion_once(state: QAState):
+    await state["text_finalized_event"].wait()
+    text = (state.get("response") or "").strip()
+    if not text:
+        state["emotion_final"] = {"name": "Joy", "intensity": 1}
+        return
 
-    def _normalize_one(payload: Any) -> Dict[str, Any]:
-        def _clamp(v: Any) -> int:
-            try:
-                n = int(v)
-            except Exception:
-                n = 1
-            return 1 if n < 1 else 3 if n > 3 else n
+    tool = AGENT_TOOLS.get("emotion_analyze")
+    if not tool:
+        state["emotion_final"] = {"name": "Joy", "intensity": 1}
+        return
 
-        if isinstance(payload, dict):
-            # preferred: {"items":[{...}]}
-            if isinstance(payload.get("items"), list) and payload["items"]:
-                first = payload["items"][0]
-                if isinstance(first, dict):
-                    nm = str(first.get("name", "Joy")).title()
-                    iv = _clamp(first.get("intensity", 1))
-                    if nm not in ("Joy", "Anger", "Sadness"):
-                        nm = "Joy"
-                    return {"items": [{"name": nm, "intensity": iv}]}
+    try:
+        res = await tool.ainvoke({"text": text})
+        emo = {
+            "name": str(res.get("name", "Joy")).title(),
+            "intensity": int(res.get("intensity", 1)),
+        }
+        state["emotion_final"] = emo
+        if state.get("queue"):
+            await state["queue"].put({"type": "emotion", "emotion": emo})
+    except Exception:
+        log.exception("[nodes:emotion] tool failed")
+        state["emotion_final"] = {"name": "Joy", "intensity": 1}
 
-            # alt: {"item": {...}}
-            if isinstance(payload.get("item"), dict):
-                it = payload["item"]
-                nm = str(it.get("name", "Joy")).title()
-                iv = _clamp(it.get("intensity", 1))
-                if nm not in ("Joy", "Anger", "Sadness"):
-                    nm = "Joy"
-                return {"items": [{"name": nm, "intensity": iv}]}
-
-            # legacy: three items → pick max intensity with tie-break
-            if isinstance(payload.get("items"), list) and len(payload["items"]) >= 3:
-                order = {"Joy": 3, "Anger": 2, "Sadness": 1}
-                best = None
-                for it in payload["items"]:
-                    if not isinstance(it, dict): 
-                        continue
-                    nm = str(it.get("name", "")).title()
-                    iv = _clamp(it.get("intensity", 1))
-                    if nm not in order:
-                        continue
-                    if (best is None or iv > best[1] or (iv == best[1] and order[nm] > order[best[0]])):
-                        best = (nm, iv)
-                if best:
-                    return {"items": [{"name": best[0], "intensity": best[1]}]}
-
-            # alt: {"name":..., "intensity":...}
-            if "name" in payload and "intensity" in payload:
-                nm = str(payload.get("name", "Joy")).title()
-                iv = _clamp(payload.get("intensity", 1))
-                if nm not in ("Joy", "Anger", "Sadness"):
-                    nm = "Joy"
-                return {"items": [{"name": nm, "intensity": iv}]}
-
-        # fallback
-        return {"items": [{"name": "Joy", "intensity": 1}]}
-
-    while attempt <= S.emotion_retries:
-        attempt += 1
-        try:
-            cls = ChatOpenAI(
-                model=S.emotion_model,
-                temperature=S.emotion_temperature,
-                timeout=S.emotion_timeout_s
-            )
-            msg = await cls.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
-            raw = (getattr(msg, "content", "") or "").strip()
-            data = json.loads(raw)
-            return _normalize_one(data)
-        except Exception:
-            if attempt <= S.emotion_retries:
-                continue
-            break
-    return {"items": [{"name": "Joy", "intensity": 1}]}
 
 # =============================================================================
 # Run both streams in parallel
@@ -592,11 +636,13 @@ async def _classify_emotion(*, sentence: str, state: QAState) -> Dict[str, Any]:
 async def n_run(state: QAState) -> QAState:
     t0 = time.perf_counter()
     await asyncio.gather(
-        _stream_text_with_audio(state),
-        _tool_router_and_stream(state),
+        _tool_router_and_stream(state),   # finalize slides first (gated)
+        _stream_text_with_audio(state),   # text waits for slides_ready_event
+        _emit_emotion_once(state),        # single emotion result, separate event
     )
     state["timings"]["run_ms"] = _elapsed_ms(t0)
     return state
+
 
 # =============================================================================
 # Finalize & Persist
@@ -605,34 +651,36 @@ async def n_finalize_and_persist(state: QAState) -> QAState:
     timings = dict(state.get("timings") or {})
     meta = dict(state.get("meta") or {})
     meta.update({
-        "schema": "engine.v3",
+        "schema": "engine.v7",
         "bot_id": state.get("bot_id"),
         "thread_id": state.get("thread_id"),
         "model": state.get("model") or "gpt-4o-mini",
         "timings_ms": timings,
         "response_len": len(state.get("response") or ""),
         "tools": list(AGENT_TOOLS.keys()),
+        "frame_ms": FRAME_MS,
+        # helpful trace flags
+        "slides_tool_used": bool(state.get("slides_tool_used")),
+        "slides_write_persisted": bool(state.get("slides_write_persisted")),
     })
 
-    final_emotion = _emotion_state_finalize(state.get("emotion_state", _emotion_state_init()))
-    final_viseme = _viseme_state_finalize(state.get("viseme_state", _viseme_state_init()))
+    viseme_json = {}
+    if state.get("viseme_frames"):
+        viseme_json = {
+            "frame_ms": FRAME_MS,
+            "frames": state["viseme_frames"],
+        }
 
     try:
         await _persist_chat(
             session=state["session"],
             query=state.get("query") or "",
             response=state.get("response") or "",
-            emotion=final_emotion,
-            viseme=final_viseme,
+            emotion=(state.get("emotion_final") or {}),
+            viseme=viseme_json,
             meta=meta,
         )
     except Exception:
         log.exception("[nodes:finalize] persist chat failed")
-
-    try:
-        if state.get("slides_latest"):
-            await _upsert_slides(state["session"], state["slides_latest"])
-    except Exception:
-        log.exception("[nodes:finalize] persist slides failed")
 
     return state
