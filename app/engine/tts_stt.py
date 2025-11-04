@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import logging
 from io import BytesIO
 from time import perf_counter
@@ -94,38 +95,80 @@ _BASE_SHAPES: Dict[str, Dict[int, float]] = {
     "REST":   {JAW_OPEN:.08, MOUTH_CLOSE:.06},
 }
 
-# Optional better phoneme mapping (if 'phonemizer' is installed)
+# ---------- NEW: pure-Python G2P backends (no system binaries) ----------
+VIS_USE_G2P = os.getenv("VIS_USE_G2P", "1").lower() not in ("0", "false")
+_PHONEME_BACKEND = "none"
+_HAS_G2P = False
+_g2p = None            # type: ignore
+_pronouncing = None    # type: ignore
+
 try:
-    import phonemizer  # type: ignore
-    from phonemizer.backend import EspeakBackend  # type: ignore
+    if VIS_USE_G2P:
+        try:
+            from g2p_en import G2p  # preferred
+            _g2p = G2p()
+            _PHONEME_BACKEND = "g2p_en"
+            _HAS_G2P = True
+            log.info("[Viseme] using g2p_en backend")
+        except Exception:
+            try:
+                import pronouncing as _pronouncing  # fallback (CMUdict)
+                _PHONEME_BACKEND = "pronouncing"
+                _HAS_G2P = True
+                log.info("[Viseme] using pronouncing backend")
+            except Exception as e2:
+                log.warning("[Viseme] no G2P backend available: %s", e2)
+except Exception as e:
+    log.warning("[Viseme] G2P disabled: %s", e)
 
-    def _phoneme_classes(text: str, lang: str = "en-us") -> List[str]:
-        """
-        Map phonemes -> coarse mouth classes.
-        """
-        backend = EspeakBackend(language=lang, punctuation_marks=";:,.!?¡¿—…" , with_stress=False)
-        phones = backend.phonemize([text], strip=True, njobs=1)[0].split()
-        classes: List[str] = []
-        for ph in phones:
-            p = ph.lower()
-            if p in {"a", "e", "i", "o", "u", "@", "3", "A", "E", "I", "O", "U"}:
-                classes.append("VOWEL")
-            elif p in {"b", "p", "m"}:
-                classes.append("LABIAL")
-            elif p in {"f", "v", "s", "z", "S", "Z", "h", "x"}:
-                classes.append("FRIC")
-            elif p in {"t", "d", "l", "n", "r"}:
-                classes.append("ALV")
-            elif p in {"k", "g", "q"}:
-                classes.append("VEL")
-            else:
-                classes.append("REST")
-        return classes
+# ARPAbet → coarse mouth classes
+_VOWEL_ARPA = {
+    "AA","AE","AH","AO","AW","AY","EH","ER","EY","IH","IY","OW","OY","UH","UW"
+}
+_LABIAL_ARPA = {"P","B","M"}
+_FRIC_ARPA   = {"F","V","S","Z","SH","ZH","HH","TH","DH"}
+_ALV_ARPA    = {"T","D","L","N","R"}
+_VEL_ARPA    = {"K","G","NG"}
 
-    _HAS_PHONEMES = True
-except Exception:
-    _HAS_PHONEMES = False
+def _arpa_to_class(ph: str) -> str:
+    base = "".join(ch for ch in (ph or "") if not ch.isdigit())  # strip stress digits
+    if base in _VOWEL_ARPA:   return "VOWEL"
+    if base in _LABIAL_ARPA:  return "LABIAL"
+    if base in _FRIC_ARPA:    return "FRIC"
+    if base in _ALV_ARPA:     return "ALV"
+    if base in _VEL_ARPA:     return "VEL"
+    return "REST"
 
+def _g2p_classes(text: str) -> List[str]:
+    """
+    Map text -> ARPAbet phonemes -> coarse mouth classes using a pure-Python backend.
+    Returns [] if backend unavailable so caller can fallback to heuristics.
+    """
+    if not _HAS_G2P or not (text or "").strip():
+        return []
+    phones: List[str] = []
+    if _PHONEME_BACKEND == "g2p_en":
+        # g2p_en returns tokens incl. spaces; filter & keep phoneme tokens only
+        try:
+            for tok in _g2p(text or ""):  # type: ignore
+                if tok and tok != " ":
+                    phones.append(tok)
+        except Exception:
+            phones = []
+    elif _PHONEME_BACKEND == "pronouncing":
+        words = re.findall(r"[A-Za-z']+", text or "")
+        try:
+            for w in words:
+                cands = _pronouncing.phones_for_word(w.lower())  # type: ignore
+                if cands:
+                    phones.extend(cands[0].split())
+        except Exception:
+            phones = []
+    if not phones:
+        return []
+    return [_arpa_to_class(ph) for ph in phones]
+
+# (keep a simple character-based heuristic too)
 _VOWELS = set("aeiou")
 _LABIALS = set("bmp")
 _FRIC = set("fvszx")
@@ -150,7 +193,7 @@ def _db_to_unit(db: float, floor_db: float) -> float:
 
 def _envelope_from_audio_dbfs(audio_bytes: bytes, frames: int) -> List[float]:
     """
-    dBFS per 100ms chunk → normalize by 90th percentile → apply gain/gamma.
+    dBFS per frame chunk → normalize by 90th percentile → apply gain/gamma.
     """
     try:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
@@ -194,11 +237,10 @@ def _smooth(prev: List[float], cur: List[float], alpha: float) -> List[float]:
 def _sequence_classes(text: str, frames: int) -> List[str]:
     """
     Produce a sequence of coarse mouth classes with length == frames.
-    If phonemizer is available, use it; otherwise, character heuristic.
+    Prefer G2P if available; otherwise, character heuristic.
     """
-    if _HAS_PHONEMES:
-        classes = _phoneme_classes(text or "")
-    else:
+    classes = _g2p_classes(text or "")
+    if not classes:
         chars = [c for c in (text or "") if not c.isspace()]
         classes = [_char_class(c) for c in chars]
     if not classes:
@@ -404,7 +446,7 @@ async def synthesize_tts_async(text: str, service: str | None, voice_id: str | N
     except Exception as e:
         log.warning("[TTS] normalization skipped: %s", e)
 
-    # Convai-like visemes (100ms index timing by default)
+    # Convai-like visemes (per-frame timing from VIS_FPS)
     dur = _mp3_duration_ms(audio, fallback_ms=max(300, int(len(text) * 40)))
     vis = _convai_frames(text, dur, audio_bytes=audio)
 
