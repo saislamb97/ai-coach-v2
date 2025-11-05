@@ -8,7 +8,19 @@ from django.utils.html import strip_tags
 
 log = logging.getLogger(__name__)
 
-# --- sentence splitting (unchanged) ---
+# -----------------------------------------------------------------------------
+# Small helpers
+# -----------------------------------------------------------------------------
+def elapsed_ms(t0: float) -> int:
+    import time
+    return int((time.perf_counter() - t0) * 1000)
+
+def _collapse_ws(s: str) -> str:
+    return "" if not s else regex.sub(r"[ \t\f\v\u00A0]+", " ", s)
+
+# -----------------------------------------------------------------------------
+# Sentence splitting (unchanged behavior)
+# -----------------------------------------------------------------------------
 _COMMON_ABBREVIATIONS = {
     "mr","mrs","ms","dr","prof","sr","jr","st","vs","etc","e.g","i.e",
     "a.m","p.m","u.s","u.k","usa","uk","no","inc","dept","fig","al","eds","repr"
@@ -24,9 +36,6 @@ _SENTENCE_BOUNDARY_RE = regex.compile(
          (?=\s|$)""",
     flags=regex.VERBOSE | regex.IGNORECASE,
 )
-
-def _collapse_ws(s: str) -> str:
-    return "" if not s else regex.sub(r"[ \t\f\v\u00A0]+", " ", s)
 
 def extract_sentences(buffer: str) -> Tuple[List[str], str]:
     text = (buffer or "")
@@ -45,59 +54,125 @@ def extract_sentences(buffer: str) -> Tuple[List[str], str]:
             fixed.append(s + ".")
     return fixed, remainder
 
-# --- prompt helpers (UPDATED) ---
-def _base_preamble(bot_name: str, bot_id: str, instruction: Optional[str]) -> str:
-    safe_name = (bot_name or "Assistant").strip()
-    safe_instr = strip_tags(instruction or "").strip()
-    core = dedent(f"""
-        You are {safe_name} (bot_id={bot_id}).
-        Be clear, concise, and factual. Prefer short sentences (≤ 20 words).
-        Avoid filler and apologies. Never output Editor.js or any JSON.
-        If another system message provides policy flags (e.g., slides_write_persisted), you MUST obey them.
-    """).strip()
-    return f"{core}\n{safe_instr}" if safe_instr else core
+# -----------------------------------------------------------------------------
+# Slides context helpers (compact & unambiguous)
+# -----------------------------------------------------------------------------
+def _flatten_editorjs_for_prompt(editorjs: Dict[str, Any], *, limit_blocks: int = 60) -> List[str]:
+    if not isinstance(editorjs, dict):
+        return []
+    blocks = editorjs.get("blocks") or []
+    lines: List[str] = []
+    for b in blocks[:limit_blocks]:
+        t = (b.get("type") or "").lower()
+        d = b.get("data") or {}
+        if t == "header":
+            txt = (d.get("text") or "").strip()
+            if txt:
+                lines.append(f"# {txt}")
+        elif t == "paragraph":
+            txt = (d.get("text") or "").strip()
+            if txt:
+                lines.append(txt)
+        elif t == "list":
+            items = d.get("items") or []
+            for it in items[:8]:
+                s = str(it).strip()
+                if s:
+                    lines.append(f"- {s}")
+    return lines
 
+def build_slides_context(snap: Dict[str, Any]) -> str:
+    title = snap.get("title") or ""
+    summary = snap.get("summary") or ""
+    editorjs = snap.get("editorjs") or {}
+    blocks = (editorjs or {}).get("blocks") or []
+
+    version = snap.get("version")
+    updated_by = snap.get("updated_by") or ""
+    updated_at = snap.get("updated_at") or ""
+    diff = snap.get("diff_headers") or {}
+
+    lines: List[str] = []
+
+    # CURRENT — the only source of truth
+    lines.append("## CURRENT DECK — SOURCE OF TRUTH (use ONLY this for facts)")
+    lines.append(f"Meta: v{version} • by {updated_by} • at {updated_at}")
+    lines.append(f"Title: {title or '—'}")
+    if summary:
+        lines.append(f"Summary: {summary}")
+    if blocks:
+        lines.extend(_flatten_editorjs_for_prompt(editorjs))
+    else:
+        lines.append("[No current sections yet]")
+
+    # CHANGELOG from diff_headers
+    adds = list(diff.get("added") or [])
+    rems = list(diff.get("removed") or [])
+    if adds or rems:
+        lines.append("\n## CHANGELOG (since previous)")
+        if adds:
+            lines.append("Added: " + ", ".join(adds[:10]))
+        if rems:
+            lines.append("Removed: " + ", ".join(rems[:10]))
+
+    # PREVIOUS — history only
+    prev = snap.get("previous") or {}
+    prev_title = prev.get("title") or ""
+    prev_summary = prev.get("summary") or ""
+    prev_ej = prev.get("editorjs") or {}
+
+    if prev_title or prev_summary or (prev_ej or {}).get("blocks"):
+        lines.append("\n## PREVIOUS DECK — HISTORY ONLY (do NOT use for current facts)")
+        if prev_title:
+            lines.append(f"Prev Title: {prev_title}")
+        if prev_summary:
+            lines.append(f"Prev Summary: {prev_summary}")
+        lines.extend(_flatten_editorjs_for_prompt(prev_ej))
+
+    out = "\n".join(lines)
+    return out[:6000] + ("\n…" if len(out) > 6000 else "")
+
+# -----------------------------------------------------------------------------
+# Prompts (strong slide-tool policy)
+# -----------------------------------------------------------------------------
+def build_router_system_prompt() -> str:
+    """
+    STRONG policy: any slide/deck/presentation request MUST use slide tools.
+    The model must not draft slide content in the chat.
+    """
+    return dedent("""
+        You can call tools. Follow this policy strictly:
+
+        SLIDES-ONLY VIA TOOLS
+        - For ANY request that mentions a slide/deck/presentation (create, generate, make, update, edit, revise, add, convert, improve):
+            -> Call generate_or_update_slides(prompt=USER_MESSAGE, ai_enrich=true, max_sections=6). Do not ask the user for title/audience/goal; the tool will infer.
+        - For ANY request to show/view/see/check/what changed/diff/updates in slides:
+            -> Call fetch_latest_slides() and then summarize based ONLY on the returned snapshot.
+
+        NEVER draft slide content directly in your chat response.
+        NEVER say you don't have access; if slide data is needed, call fetch_latest_slides().
+
+        If the user is not asking about slides, do not call slide tools.
+    """).strip()
 
 def build_text_system_prompt(*, bot_name: str, bot_id: str, instruction: Optional[str] = None) -> str:
-    """
-    TEXT stream prompt.
+    safe_name = (bot_name or "Assistant").strip()
+    safe_instr = strip_tags(instruction or "").strip()
+    pre = (
+        f"You are {safe_name} (bot_id={bot_id}). Be concise and specific.\n"
+        "Prefer short bullets over long paragraphs."
+    )
+    if safe_instr:
+        pre = f"{pre}\n{safe_instr}"
 
-    Slides-aware behavior (READ-ONLY):
-    - If a separate system message includes **Slides Snapshot** (and optionally **Previous Snapshot**),
-      talk about slides using ONLY those lines. Quote Title/Summary verbatim if needed.
-    - If the user asks for "latest", "current", "what changed", "diff", or "compare":
-        * Produce a concise change log derived ONLY from the two snapshots:
-            • Title: <previous> → <current> (include only if different)
-            • Summary: "updated" if changed; otherwise "no change"
-            • Sections added: list new headers (≤ 6, short phrases)
-            • Sections removed: list removed headers (≤ 6)
-            • Notable unchanged topics: up to 3 headers that appear in both
-        * If no differences are present, say "No changes detected in the deck."
-
-    Deck creation/update behavior (STRICT TOOL POLICY):
-    - If the user explicitly asks to create/make/update/edit slides, you MUST call
-      the tool: generate_or_update_slides(...). Never attempt to create or modify
-      slides in text output.
-    - Never invent slide content or output Editor.js JSON in the reply.
-    - After a tool call:
-        * If slides_write_persisted=true, say: “I’ve created/updated the deck "<Title>”.”
-          Then provide a 3–7 bullet summary (each ≤ 12 words).
-        * If slides_write_persisted=false (or absent), say: “No changes saved yet.”
-          Ask for concrete instructions and do not imply the deck was updated.
-
-    General behavior:
-    - For slide Q&A/improvements (not creation), answer concisely in prose/bullets.
-    - For non-slide topics, answer normally in concise prose. Prefer exact names, dates, metrics.
-    - Safety: briefly refuse unsafe requests and suggest safer alternatives.
-    - Do NOT include code fences, tool names, or any JSON in your reply.
-    """
-    pre = _base_preamble(bot_name, bot_id, instruction)
     rules = dedent("""
-        Rules:
-        0) STRICT: If the user asks to create/make/update/edit slides, you MUST use
-           generate_or_update_slides. Never create/modify slides in text output.
-        1) Use ONLY provided snapshots for slide content; do not invent sections.
-        2) Keep bullets short and scannable; avoid redundancy.
-        3) Never output Editor.js or any JSON in text output.
+        Slides policy (runtime):
+        - If a slides context is present, treat “CURRENT DECK — SOURCE OF TRUTH” as the ONLY factual source.
+        - Never summarize “PREVIOUS DECK” unless the user asks for 'what changed', 'diff', 'previous', or 'history'.
+        - If the current deck has no sections yet, say so explicitly (e.g., “Draft deck titled ‘X’ exists; no sections yet.”)
+          Do NOT reuse previous content to describe the current deck.
+        - If a changelog is present, summarize it briefly on request.
+        - Keep answers short and useful.
     """).strip()
+
     return f"{pre}\n\n{rules}"

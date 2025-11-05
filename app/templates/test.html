@@ -141,7 +141,7 @@
           <div class="flex items-center gap-2 justify-end col-span-2 sm:col-span-1">
             <label class="text-xs text-slate-600">Playback MIME</label>
             <select id="playbackMime" class="rounded border border-slate-300 p-1 text-sm">
-              <option>audio/mpeg</option><option>audio/ogg</option><option selected>audio/webm</option>
+              <option selected>audio/mpeg</option><option>audio/ogg</option><option>audio/webm</option>
               <option>audio/wav</option><option>audio/mp4</option>
             </select>
           </div>
@@ -210,892 +210,906 @@
 
   <!-- APP SCRIPT (ESM) -->
   <script type="module">
-    import * as THREE from 'three';
-    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-    // ---------- helpers ----------
-    const $ = (s) => document.querySelector(s);
-    const now = () => new Date().toLocaleTimeString();
-    const logLine = (el, line) => { el.textContent += (el.textContent ? "\n" : "") + line; el.scrollTop = el.scrollHeight; };
-    const copyText = (el) => navigator.clipboard.writeText(el.textContent || "");
-    const clearEl = (el) => el.textContent = "";
+  // ---------- helpers ----------
+  const $ = (s) => document.querySelector(s);
+  const now = () => new Date().toLocaleTimeString();
+  const logLine = (el, line) => { el.textContent += (el.textContent ? "\n" : "") + line; el.scrollTop = el.scrollHeight; };
+  const copyText = (el) => navigator.clipboard.writeText(el.textContent || "");
+  const clearEl = (el) => el.textContent = "";
 
-    function normalizeThreadId(raw) {
-      const x = (raw || '').trim();
-      const m = x.match(/([0-9a-f]{16})$/i);
-      if (x.startsWith('user_') && m) return `user_${m[1].toLowerCase()}`;
-      if (m) return `user_${m[1].toLowerCase()}`;
-      return x;
+  function normalizeThreadId(raw) {
+    const x = (raw || '').trim();
+    const m = x.match(/([0-9a-f]{16})$/i);
+    if (x.startsWith('user_') && m) return `user_${m[1].toLowerCase()}`;
+    if (m) return `user_${m[1].toLowerCase()}`;
+    return x;
+  }
+
+  async function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve((reader.result || '').toString());
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+  function b64ToBlob(b64, mime) {
+    let raw = b64, outMime = mime || $('#playbackMime').value || 'audio/mpeg';
+    if (typeof b64 === 'string' && b64.startsWith('data:')) {
+      outMime = b64.substring(5, b64.indexOf(';')) || outMime;
+      raw = b64.split(',')[1] || '';
     }
+    const bin = atob(raw);
+    const buf = new Uint8Array(bin.length);
+    for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
+    return new Blob([buf], { type: outMime });
+  }
 
-    async function blobToBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve((reader.result || '').toString());
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-    function b64ToBlob(b64, mime) {
-      let raw = b64, outMime = mime || $('#playbackMime').value || 'audio/mpeg';
-      if (typeof b64 === 'string' && b64.startsWith('data:')) {
-        outMime = b64.substring(5, b64.indexOf(';')) || outMime;
-        raw = b64.split(',')[1] || '';
-      }
-      const bin = atob(raw);
-      const buf = new Uint8Array(bin.length);
-      for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
-      return new Blob([buf], { type: outMime });
-    }
+  // Emotion badge
+  function setEmotionBadge(name, intensity) {
+    const el = $('#emotionBadge');
+    const label = name ? `${name}` : '—';
+    const dots = { joy:'bg-amber-400', anger:'bg-rose-500', sadness:'bg-blue-500', fear:'bg-purple-500', surprise:'bg-emerald-500' };
+    const dot = dots[(name||'').toLowerCase()] || 'bg-slate-400';
+    const strong = Math.max(1, Math.min(3, Number(intensity ?? 1)));
+    el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> emotion: ${label} (${strong})`;
+    el.classList.remove('bg-amber-100','bg-rose-100','bg-blue-100','bg-emerald-100');
+    if ((name||'').toLowerCase()==='joy') el.classList.add('bg-amber-100');
+    if ((name||'').toLowerCase()==='anger') el.classList.add('bg-rose-100');
+    if ((name||'').toLowerCase()==='sadness') el.classList.add('bg-blue-100');
+    if ((name||'').toLowerCase()==='surprise') el.classList.add('bg-emerald-100');
+  }
 
-    // Emotion badge
-    function setEmotionBadge(name, intensity) {
-      const el = $('#emotionBadge');
-      const label = name ? `${name}` : '—';
-      const dots = { joy:'bg-amber-400', anger:'bg-rose-500', sadness:'bg-blue-500', fear:'bg-purple-500', surprise:'bg-emerald-500' };
-      const dot = dots[(name||'').toLowerCase()] || 'bg-slate-400';
-      const strong = Math.max(1, Math.min(3, Number(intensity ?? 1)));
-      el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> emotion: ${label} (${strong})`;
-      el.classList.remove('bg-amber-100','bg-rose-100','bg-blue-100','bg-emerald-100');
-      if ((name||'').toLowerCase()==='joy') el.classList.add('bg-amber-100');
-      if ((name||'').toLowerCase()==='anger') el.classList.add('bg-rose-100');
-      if ((name||'').toLowerCase()==='sadness') el.classList.add('bg-blue-100');
-      if ((name||'').toLowerCase()==='surprise') el.classList.add('bg-emerald-100');
-    }
+  // ---------- WS ----------
+  let ws = null;
+  let audioMuted = false;
 
-    // ---------- WS ----------
-    let ws = null;
-    let audioMuted = false;
+  function setBadge(connected){
+    const el = $('#wsStatus');
+    el.innerHTML = `<span class="h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-500'} inline-block"></span> ${connected ? 'connected' : 'disconnected'}`;
+    el.classList.toggle('bg-emerald-100', connected);
+    el.classList.toggle('bg-slate-200', !connected);
+  }
+  function setAudioBadge(muted){
+    audioMuted = !!muted;
+    const el = $('#audioBadge');
+    const dot = audioMuted ? 'bg-rose-500' : 'bg-emerald-500';
+    const txt = audioMuted ? 'audio: muted' : 'audio: unmuted';
+    el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> ${txt}`;
+    el.classList.toggle('bg-rose-100', audioMuted);
+    el.classList.toggle('bg-emerald-100', !audioMuted);
+    $('#btnToggleMute').textContent = audioMuted ? 'Unmute' : 'Mute';
+  }
 
-    function setBadge(connected){
-      const el = $('#wsStatus');
-      el.innerHTML = `<span class="h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-500'} inline-block"></span> ${connected ? 'connected' : 'disconnected'}`;
-      el.classList.toggle('bg-emerald-100', connected);
-      el.classList.toggle('bg-slate-200', !connected);
-    }
-    function setAudioBadge(muted){
-      audioMuted = !!muted;
-      const el = $('#audioBadge');
-      const dot = audioMuted ? 'bg-rose-500' : 'bg-emerald-500';
-      const txt = audioMuted ? 'audio: muted' : 'audio: unmuted';
-      el.innerHTML = `<span class="h-2 w-2 rounded-full ${dot} inline-block"></span> ${txt}`;
-      el.classList.toggle('bg-rose-100', audioMuted);
-      el.classList.toggle('bg-emerald-100', !audioMuted);
-      $('#btnToggleMute').textContent = audioMuted ? 'Unmute' : 'Mute';
-    }
+  function buildWsUrl() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const bot = encodeURIComponent($('#botId').value.trim());
+    const thr = encodeURIComponent(normalizeThreadId($('#threadId').value.trim()));
+    const lang = encodeURIComponent($('#websiteLanguage').value.trim() || 'en');
+    const key = encodeURIComponent($('#apiKey').value.trim());
+    return `${proto}://${location.host}/ws/chat/?bot_id=${bot}&thread_id=${thr}&website_language=${lang}&api_key=${key}`;
+  }
+  function setAuthCookie(){
+    const key = $('#apiKey').value.trim();
+    if (!key) return;
+    document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax`;
+  }
 
-    function buildWsUrl() {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const bot = encodeURIComponent($('#botId').value.trim());
-      const thr = encodeURIComponent(normalizeThreadId($('#threadId').value.trim()));
-      const lang = encodeURIComponent($('#websiteLanguage').value.trim() || 'en');
-      const key = encodeURIComponent($('#apiKey').value.trim());
-      return `${proto}://${location.host}/ws/chat/?bot_id=${bot}&thread_id=${thr}&website_language=${lang}&api_key=${key}`;
-    }
-    function setAuthCookie(){
-      const key = $('#apiKey').value.trim();
-      if (!key) return;
-      document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax`;
-    }
+  // ---------- Three.js scene ----------
+  let scene, camera, renderer, controls, avatarRoot = null;
+  let visemeTargets = []; // { mesh, dict, influences, ovr: map idx->morphIndex }
+  let arkitTargets = [];  // { mesh, dict, influences, a: {jawOpen,…} }
+  const threeRoot = $('#threeRoot');
 
-    // ---------- Three.js scene ----------
-    let scene, camera, renderer, controls, avatarRoot = null;
-    let visemeTargets = []; // { mesh, dict, influences, ovr: map idx->morphIndex }
-    let arkitTargets = [];  // { mesh, dict, influences, a: {jawOpen,…} }
-    const threeRoot = $('#threeRoot');
+  function initThree() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf8fafc);
 
-    function initThree() {
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0xf8fafc);
+    const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
+    camera = new THREE.PerspectiveCamera(35, w/h, 0.1, 100);
+    camera.position.set(0, 1.55, 2.2);
 
-      const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
-      camera = new THREE.PerspectiveCamera(35, w/h, 0.1, 100);
-      camera.position.set(0, 1.55, 2.2);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(w, h);
+    threeRoot.innerHTML = '';
+    threeRoot.appendChild(renderer.domElement);
 
-      renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      renderer.setSize(w, h);
-      threeRoot.innerHTML = '';
-      threeRoot.appendChild(renderer.domElement);
+    // lights
+    const key = new THREE.DirectionalLight(0xffffff, 1.0);
+    key.position.set(1, 1.8, 2.5);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+    fill.position.set(-2, 1.2, 0.6);
+    scene.add(fill);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-      // lights
-      const key = new THREE.DirectionalLight(0xffffff, 1.0);
-      key.position.set(1, 1.8, 2.5);
-      scene.add(key);
-      const fill = new THREE.DirectionalLight(0xffffff, 0.6);
-      fill.position.set(-2, 1.2, 0.6);
-      scene.add(fill);
-      scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.5, 0);
+    controls.enableDamping = true;
 
-      controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 1.5, 0);
-      controls.enableDamping = true;
+    window.addEventListener('resize', onResize);
+    tick();
+  }
 
-      window.addEventListener('resize', onResize);
-      tick();
-    }
+  function onResize() {
+    if (!renderer || !camera) return;
+    const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
+    camera.aspect = w/h; camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
 
-    function onResize() {
-      if (!renderer || !camera) return;
-      const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
-      camera.aspect = w/h; camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
-    }
+  function tick(){
+    requestAnimationFrame(tick);
+    controls?.update();
+    renderer?.render(scene, camera);
+  }
 
-    function tick(){
-      requestAnimationFrame(tick);
-      controls?.update();
-      renderer?.render(scene, camera);
-    }
-
-    function clearAvatar() {
-      if (avatarRoot) {
-        scene.remove(avatarRoot);
-        avatarRoot.traverse(n => {
-          if (n.isMesh) {
-            n.geometry?.dispose?.();
-            if (Array.isArray(n.material)) n.material.forEach(m=>m.dispose?.());
-            else n.material?.dispose?.();
-          }
-        });
-        avatarRoot = null;
-      }
-      visemeTargets = [];
-      arkitTargets = [];
-    }
-
-    function loadAvatar(glbUrl) {
-      clearAvatar();
-      const loader = new GLTFLoader().setCrossOrigin('anonymous');
-      loader.load(glbUrl, (gltf) => {
-        avatarRoot = gltf.scene || gltf.scenes?.[0];
-        scene.add(avatarRoot);
-        avatarRoot.scale.set(1,1,1);
-
-        controls.target.set(0, 1.55, 0);
-        camera.position.set(0, 1.55, 2.1);
-
-        scanBlendshapes(avatarRoot);
-        reportBlendshapes();
-
-        if (!visemeTargets.length && !arkitTargets.length) {
-          logLine($('#evtLog'), `[${now()}] ⚠️ No compatible morph targets were found on this model.`);
-        } else {
-          logLine($('#evtLog'), `[${now()}] avatar loaded; OVR=${visemeTargets.length>0} ARKit=${arkitTargets.length>0}`);
-        }
-      }, undefined, (err) => {
-        logLine($('#evtLog'), `[${now()}] avatar load error: ${err?.message || err}`);
-      });
-    }
-
-    // OVR names with a few common case variants
-    const OVR_SYNONYMS = {
-      0:  ['viseme_sil'],
-      1:  ['viseme_PP'],
-      2:  ['viseme_FF'],
-      3:  ['viseme_TH'],
-      4:  ['viseme_DD'],
-      5:  ['viseme_kk','viseme_KK'],
-      6:  ['viseme_CH'],
-      7:  ['viseme_SS'],
-      8:  ['viseme_nn','viseme_NN'],
-      9:  ['viseme_RR'],
-      10: ['viseme_aa','viseme_AA'],
-      11: ['viseme_E'],
-      12: ['viseme_I'],
-      13: ['viseme_O'],
-      14: ['viseme_U'],
-    };
-
-    // ARKit primary + common RPM synonyms
-    const ARKIT_CANON = [
-      'jawOpen','mouthClose','mouthFunnel','mouthPucker',
-      'mouthSmileLeft','mouthSmileRight','mouthFrownLeft','mouthFrownRight',
-      'mouthDimpleLeft','mouthDimpleRight','mouthStretchLeft','mouthStretchRight',
-      'tongueOut'
-    ];
-    const ARKIT_SYNONYMS = {
-      jawOpen:        ['jawOpen','mouthOpen'],
-      mouthClose:     ['mouthClose'],
-      mouthFunnel:    ['mouthFunnel','lipsFunnel'],
-      mouthPucker:    ['mouthPucker','lipsPucker'],
-      mouthSmileLeft: ['mouthSmileLeft','mouthSmile'],
-      mouthSmileRight:['mouthSmileRight'],
-      mouthFrownLeft: ['mouthFrownLeft'],
-      mouthFrownRight:['mouthFrownRight'],
-      mouthDimpleLeft:['mouthDimpleLeft'],
-      mouthDimpleRight:['mouthDimpleRight'],
-      mouthStretchLeft:['mouthStretchLeft'],
-      mouthStretchRight:['mouthStretchRight'],
-      tongueOut:      ['tongueOut']
-    };
-
-    function scanBlendshapes(root) {
-      visemeTargets = [];
-      arkitTargets = [];
-      root.traverse(obj => {
-        if (!obj.isMesh || !obj.morphTargetDictionary || !obj.morphTargetInfluences) return;
-
-        const dict = obj.morphTargetDictionary;
-
-        // OVR visemes
-        const ovr = {};
-        let hasOVR = false;
-        for (let i=0;i<15;i++){
-          const names = OVR_SYNONYMS[i] || [];
-          for (const n of names) {
-            if (dict[n] != null) { ovr[i] = dict[n]; hasOVR = true; break; }
-          }
-        }
-        if (hasOVR) {
-          visemeTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, ovr });
-        }
-
-        // ARKit (with synonyms)
-        const a = {};
-        let hasARK = false;
-        for (const key of ARKIT_CANON) {
-          for (const name of ARKIT_SYNONYMS[key]) {
-            if (dict[name] != null) { a[key] = dict[name]; hasARK = true; break; }
-          }
-        }
-        if (hasARK) {
-          arkitTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, a });
+  function clearAvatar() {
+    if (avatarRoot) {
+      scene.remove(avatarRoot);
+      avatarRoot.traverse(n => {
+        if (n.isMesh) {
+          n.geometry?.dispose?.();
+          if (Array.isArray(n.material)) n.material.forEach(m=>m.dispose?.());
+          else n.material?.dispose?.();
         }
       });
+      avatarRoot = null;
     }
+    visemeTargets = [];
+    arkitTargets = [];
+  }
 
-    function reportBlendshapes() {
-      const namesFound = new Set();
-      for (const t of visemeTargets) {
-        for (const [name] of Object.entries(t.dict)) if (name.startsWith('viseme_')) namesFound.add(name);
+  function loadAvatar(glbUrl) {
+    clearAvatar();
+    const loader = new GLTFLoader().setCrossOrigin('anonymous');
+    loader.load(glbUrl, (gltf) => {
+      avatarRoot = gltf.scene || gltf.scenes?.[0];
+      scene.add(avatarRoot);
+      avatarRoot.scale.set(1,1,1);
+
+      controls.target.set(0, 1.55, 0);
+      camera.position.set(0, 1.55, 2.1);
+
+      scanBlendshapes(avatarRoot);
+      reportBlendshapes();
+
+      if (!visemeTargets.length && !arkitTargets.length) {
+        logLine($('#evtLog'), `[${now()}] ⚠️ No compatible morph targets were found on this model.`);
+      } else {
+        logLine($('#evtLog'), `[${now()}] avatar loaded; OVR=${visemeTargets.length>0} ARKit=${arkitTargets.length>0}`);
       }
-      const aFound = new Set();
-      for (const t of arkitTargets) {
-        for (const [k, arr] of Object.entries(ARKIT_SYNONYMS)) {
-          for (const n of arr) if (t.dict[n] != null) aFound.add(n);
+    }, undefined, (err) => {
+      logLine($('#evtLog'), `[${now()}] avatar load error: ${err?.message || err}`);
+    });
+  }
+
+  // OVR names with a few common case variants
+  const OVR_SYNONYMS = {
+    0:  ['viseme_sil'],
+    1:  ['viseme_PP'],
+    2:  ['viseme_FF'],
+    3:  ['viseme_TH'],
+    4:  ['viseme_DD'],
+    5:  ['viseme_kk','viseme_KK'],
+    6:  ['viseme_CH'],
+    7:  ['viseme_SS'],
+    8:  ['viseme_nn','viseme_NN'],
+    9:  ['viseme_RR'],
+    10: ['viseme_aa','viseme_AA'],
+    11: ['viseme_E'],
+    12: ['viseme_I'],
+    13: ['viseme_O'],
+    14: ['viseme_U'],
+  };
+
+  // ARKit primary + common RPM synonyms
+  const ARKIT_CANON = [
+    'jawOpen','mouthClose','mouthFunnel','mouthPucker',
+    'mouthSmileLeft','mouthSmileRight','mouthFrownLeft','mouthFrownRight',
+    'mouthDimpleLeft','mouthDimpleRight','mouthStretchLeft','mouthStretchRight',
+    'tongueOut'
+  ];
+  const ARKIT_SYNONYMS = {
+    jawOpen:        ['jawOpen','mouthOpen'],
+    mouthClose:     ['mouthClose'],
+    mouthFunnel:    ['mouthFunnel','lipsFunnel'],
+    mouthPucker:    ['mouthPucker','lipsPucker'],
+    mouthSmileLeft: ['mouthSmileLeft','mouthSmile'],
+    mouthSmileRight:['mouthSmileRight'],
+    mouthFrownLeft: ['mouthFrownLeft'],
+    mouthFrownRight:['mouthFrownRight'],
+    mouthDimpleLeft:['mouthDimpleLeft'],
+    mouthDimpleRight:['mouthDimpleRight'],
+    mouthStretchLeft:['mouthStretchLeft'],
+    mouthStretchRight:['mouthStretchRight'],
+    tongueOut:      ['tongueOut']
+  };
+
+  function scanBlendshapes(root) {
+    visemeTargets = [];
+    arkitTargets = [];
+    root.traverse(obj => {
+      if (!obj.isMesh || !obj.morphTargetDictionary || !obj.morphTargetInfluences) return;
+
+      const dict = obj.morphTargetDictionary;
+
+      // OVR visemes
+      const ovr = {};
+      let hasOVR = false;
+      for (let i=0;i<15;i++){
+        const names = OVR_SYNONYMS[i] || [];
+        for (const n of names) {
+          if (dict[n] != null) { ovr[i] = dict[n]; hasOVR = true; break; }
         }
       }
-      logLine($('#evtLog'), `[${now()}] OVR morphs: ${namesFound.size ? Array.from(namesFound).sort().join(', ') : 'none'}`);
-      logLine($('#evtLog'), `[${now()}] ARKit morphs: ${aFound.size ? Array.from(aFound).sort().join(', ') : 'none'}`);
+      if (hasOVR) {
+        visemeTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, ovr });
+      }
+
+      // ARKit (with synonyms)
+      const a = {};
+      let hasARK = false;
+      for (const key of ARKIT_CANON) {
+        for (const name of ARKIT_SYNONYMS[key]) {
+          if (dict[name] != null) { a[key] = dict[name]; hasARK = true; break; }
+        }
+      }
+      if (hasARK) {
+        arkitTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, a });
+      }
+    });
+  }
+
+  function reportBlendshapes() {
+    const namesFound = new Set();
+    for (const t of visemeTargets) {
+      for (const [name] of Object.entries(t.dict)) if (name.startsWith('viseme_')) namesFound.add(name);
     }
-
-    // ----- ARKit<->OVR conversion helpers -----
-    function arkitToOvr(out) {
-      const ovr = new Array(15).fill(0);
-      ovr[0]  = Math.max(0, 1 - out[0]);      // sil ~ inverse jaw
-      ovr[1]  = out[2];                        // PP ~ mouthClose
-      ovr[2]  = out[12];                       // FF ~ mouthStretch
-      ovr[3]  = 0.5*(out[12]+out[13]);         // TH ~ stretch mix
-      ovr[4]  = 0.4*out[2] + 0.6*out[8];       // DD ~ close+frown
-      ovr[5]  = 0.4*out[0] + 0.2*out[1];       // kk ~ open+funnel
-      ovr[6]  = 0.6*out[1] + 0.4*out[3];       // CH ~ funnel+pucker
-      ovr[7]  = out[12];                       // SS ~ stretch
-      ovr[8]  = 0.2*out[2];                    // nn ~ slight close
-      ovr[9]  = 0.3*out[1];                    // RR ~ funnelish
-      ovr[10] = out[0];                        // aa ~ jawOpen
-      ovr[11] = 0.4*out[12] + 0.2*out[0];      // E
-      ovr[12] = 0.6*out[12] + 0.2*out[0];      // I
-      ovr[13] = 0.8*out[1] + 0.6*out[3];       // O ~ funnel+pucker
-      ovr[14] = 0.9*out[3];                    // U ~ pucker
-      return ovr.map(v => Math.max(0, Math.min(1, v)));
+    const aFound = new Set();
+    for (const t of arkitTargets) {
+      for (const [k, arr] of Object.entries(ARKIT_SYNONYMS)) {
+        for (const n of arr) if (t.dict[n] != null) aFound.add(n);
+      }
     }
-    function ovrToArkit(vals) {
-      const out = new Array(15).fill(0);
-      out[0]  = vals[10];                      // jawOpen ~ aa
-      out[1]  = Math.max(vals[13], vals[14]);  // mouthFunnel ~ O/U
-      out[2]  = vals[1];                       // mouthClose ~ PP
-      out[3]  = vals[14];                      // mouthPucker ~ U
-      out[12] = Math.max(vals[2], vals[7]);    // stretch
-      out[13] = vals[7];
-      out[4]  = 0.5*vals[10];                  // smile L/R from vowels
-      out[5]  = 0.5*vals[10];
-      return out.map(v => Math.max(0, Math.min(1, v)));
+    logLine($('#evtLog'), `[${now()}] OVR morphs: ${namesFound.size ? Array.from(namesFound).sort().join(', ') : 'none'}`);
+    logLine($('#evtLog'), `[${now()}] ARKit morphs: ${aFound.size ? Array.from(aFound).sort().join(', ') : 'none'}`);
+  }
+
+  // ----- ARKit<->OVR conversion helpers -----
+  function arkitToOvr(out) {
+    const ovr = new Array(15).fill(0);
+    ovr[0]  = Math.max(0, 1 - out[0]);      // sil ~ inverse jaw
+    ovr[1]  = out[2];                        // PP ~ mouthClose
+    ovr[2]  = out[12];                       // FF ~ mouthStretch
+    ovr[3]  = 0.5*(out[12]+out[13]);         // TH ~ stretch mix
+    ovr[4]  = 0.4*out[2] + 0.6*out[8];       // DD ~ close+frown
+    ovr[5]  = 0.4*out[0] + 0.2*out[1];       // kk ~ open+funnel
+    ovr[6]  = 0.6*out[1] + 0.4*out[3];       // CH ~ funnel+pucker
+    ovr[7]  = out[12];                       // SS ~ stretch
+    ovr[8]  = 0.2*out[2];                    // nn ~ slight close
+    ovr[9]  = 0.3*out[1];                    // RR ~ funnelish
+    ovr[10] = out[0];                        // aa ~ jawOpen
+    ovr[11] = 0.4*out[12] + 0.2*out[0];      // E
+    ovr[12] = 0.6*out[12] + 0.2*out[0];      // I
+    ovr[13] = 0.8*out[1] + 0.6*out[3];       // O ~ funnel+pucker
+    ovr[14] = 0.9*out[3];                    // U ~ pucker
+    return ovr.map(v => Math.max(0, Math.min(1, v)));
+  }
+  function ovrToArkit(vals) {
+    const out = new Array(15).fill(0);
+    out[0]  = vals[10];                      // jawOpen ~ aa
+    out[1]  = Math.max(vals[13], vals[14]);  // mouthFunnel ~ O/U
+    out[2]  = vals[1];                       // mouthClose ~ PP
+    out[3]  = vals[14];                      // mouthPucker ~ U
+    out[12] = Math.max(vals[2], vals[7]);    // stretch
+    out[13] = vals[7];
+    out[4]  = 0.5*vals[10];                  // smile L/R from vowels
+    out[5]  = 0.5*vals[10];
+    return out.map(v => Math.max(0, Math.min(1, v)));
+  }
+
+  // UI gain + smoothing
+  const gainEl = $('#visemeGain');
+  const gainVal = $('#visemeGainVal');
+  const smoothEl = $('#visemeSmooth');
+  const smoothVal = $('#visemeSmoothVal');
+
+  function getGain() { return (Number(gainEl.value || 100) / 100); }
+  function getSmooth() { return (Number(smoothEl.value || 0) / 100); }
+  gainEl.oninput = () => gainVal.textContent = `${getGain().toFixed(2)}×`;
+  smoothEl.oninput = () => smoothVal.textContent = `${getSmooth().toFixed(2)}`;
+
+  function resetMorphs() {
+    const zero = new Array(15).fill(0);
+    prevFrame = zero.slice();
+    // ARKit
+    for (const t of arkitTargets) {
+      const d = t.a, inf = t.influences;
+      if (d.jawOpen      != null) inf[d.jawOpen]      = 0;
+      if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = 0;
+      if (d.mouthClose   != null) inf[d.mouthClose]   = 0;
+      if (d.mouthPucker  != null) inf[d.mouthPucker]  = 0;
+      const more = ["mouthSmileLeft","mouthSmileRight","mouthFrownLeft","mouthFrownRight","mouthDimpleLeft","mouthDimpleRight","mouthStretchLeft","mouthStretchRight","tongueOut"];
+      for (const name of more) {
+        const k = t.dict[name];
+        if (k != null) t.influences[k] = 0;
+      }
     }
+    // OVR
+    for (const t of visemeTargets) {
+      const inf = t.influences;
+      for (let i=0;i<15;i++) {
+        const idx = t.ovr[i];
+        if (idx != null) inf[idx] = 0;
+      }
+    }
+  }
 
-    // UI gain + smoothing
-    const gainEl = $('#visemeGain');
-    const gainVal = $('#visemeGainVal');
-    const smoothEl = $('#visemeSmooth');
-    const smoothVal = $('#visemeSmoothVal');
+  let prevFrame = new Array(15).fill(0);
+  function applyVisemeFrame(frame, fmt='arkit15') {
+    const f = Array.isArray(frame) ? frame.slice(0,15) : [];
+    // pre-scale + smooth
+    const out = new Array(15).fill(0);
+    const g = getGain();
+    const s = getSmooth();
+    for (let i=0;i<15;i++){
+      const target = Math.max(0, Math.min(1, Number(f[i] ?? 0)));
+      const sm = prevFrame[i] + (target - prevFrame[i]) * (1 - s); // low-pass
+      out[i] = Math.max(0, Math.min(1, sm * g));
+    }
+    prevFrame = out;
 
-    function getGain() { return (Number(gainEl.value || 100) / 100); }
-    function getSmooth() { return (Number(smoothEl.value || 0) / 100); }
-    gainEl.oninput = () => gainVal.textContent = `${getGain().toFixed(2)}×`;
-    smoothEl.oninput = () => smoothVal.textContent = `${getSmooth().toFixed(2)}`;
-
-    function resetMorphs() {
-      const zero = new Array(15).fill(0);
-      prevFrame = zero.slice();
-      // ARKit
+    // If we have ARKit morphs and fmt is ARKit => drive directly
+    if (fmt === 'arkit15' && arkitTargets.length) {
       for (const t of arkitTargets) {
         const d = t.a, inf = t.influences;
-        if (d.jawOpen      != null) inf[d.jawOpen]      = 0;
-        if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = 0;
-        if (d.mouthClose   != null) inf[d.mouthClose]   = 0;
-        if (d.mouthPucker  != null) inf[d.mouthPucker]  = 0;
-        const more = ["mouthSmileLeft","mouthSmileRight","mouthFrownLeft","mouthFrownRight","mouthDimpleLeft","mouthDimpleRight","mouthStretchLeft","mouthStretchRight","tongueOut"];
-        for (const name of more) {
+        if (d.jawOpen      != null) inf[d.jawOpen]      = out[0];
+        if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = out[1];
+        if (d.mouthClose   != null) inf[d.mouthClose]   = out[2];
+        if (d.mouthPucker  != null) inf[d.mouthPucker]  = out[3];
+        const more = [
+          ["mouthSmileLeft",4],["mouthSmileRight",5],["mouthFrownLeft",8],["mouthFrownRight",9],
+          ["mouthDimpleLeft",10],["mouthDimpleRight",11],["mouthStretchLeft",12],["mouthStretchRight",13],
+          ["tongueOut",14],
+        ];
+        for (const [name, idx] of more) {
           const k = t.dict[name];
-          if (k != null) t.influences[k] = 0;
+          if (k != null) inf[k] = out[idx];
         }
       }
-      // OVR
+      return;
+    }
+
+    // If fmt is ARKit but only OVR exists -> convert
+    if (fmt === 'arkit15' && visemeTargets.length && !arkitTargets.length) {
+      const vals = arkitToOvr(out);
       for (const t of visemeTargets) {
         const inf = t.influences;
         for (let i=0;i<15;i++) {
           const idx = t.ovr[i];
-          if (idx != null) inf[idx] = 0;
+          if (idx != null) inf[idx] = vals[i];
         }
       }
+      return;
     }
 
-    let prevFrame = new Array(15).fill(0);
-    function applyVisemeFrame(frame, fmt='arkit15') {
-      const f = Array.isArray(frame) ? frame.slice(0,15) : [];
-      // pre-scale + smooth
-      const out = new Array(15).fill(0);
-      const g = getGain();
-      const s = getSmooth();
-      for (let i=0;i<15;i++){
-        const target = Math.max(0, Math.min(1, Number(f[i] ?? 0)));
-        const sm = prevFrame[i] + (target - prevFrame[i]) * (1 - s); // low-pass
-        out[i] = Math.max(0, Math.min(1, sm * g));
-      }
-      prevFrame = out;
-
-      // If we have ARKit morphs and fmt is ARKit => drive directly
-      if (fmt === 'arkit15' && arkitTargets.length) {
-        for (const t of arkitTargets) {
-          const d = t.a, inf = t.influences;
-          if (d.jawOpen      != null) inf[d.jawOpen]      = out[0];
-          if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = out[1];
-          if (d.mouthClose   != null) inf[d.mouthClose]   = out[2];
-          if (d.mouthPucker  != null) inf[d.mouthPucker]  = out[3];
-          const more = [
-            ["mouthSmileLeft",4],["mouthSmileRight",5],["mouthFrownLeft",8],["mouthFrownRight",9],
-            ["mouthDimpleLeft",10],["mouthDimpleRight",11],["mouthStretchLeft",12],["mouthStretchRight",13],
-            ["tongueOut",14],
-          ];
-          for (const [name, idx] of more) {
-            const k = t.dict[name];
-            if (k != null) inf[k] = out[idx];
-          }
-        }
-        return;
-      }
-
-      // If fmt is ARKit but only OVR exists -> convert
-      if (fmt === 'arkit15' && visemeTargets.length && !arkitTargets.length) {
-        const vals = arkitToOvr(out);
-        for (const t of visemeTargets) {
-          const inf = t.influences;
-          for (let i=0;i<15;i++) {
-            const idx = t.ovr[i];
-            if (idx != null) inf[idx] = vals[i];
-          }
-        }
-        return;
-      }
-
-      // fmt is OVR and we have OVR -> drive directly
-      if (fmt === 'ovr15' && visemeTargets.length) {
-        for (const t of visemeTargets) {
-          const inf = t.influences;
-          for (let i=0;i<15;i++) {
-            const idx = t.ovr[i];
-            if (idx != null) inf[idx] = out[i];
-          }
-        }
-        return;
-      }
-
-      // fmt is OVR but only ARKit exists -> convert
-      if (fmt === 'ovr15' && arkitTargets.length && !visemeTargets.length) {
-        const vals = ovrToArkit(out);
-        for (const t of arkitTargets) {
-          const d = t.a, inf = t.influences;
-          if (d.jawOpen      != null) inf[d.jawOpen]      = vals[0];
-          if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = vals[1];
-          if (d.mouthClose   != null) inf[d.mouthClose]   = vals[2];
-          if (d.mouthPucker  != null) inf[d.mouthPucker]  = vals[3];
+    // fmt is OVR and we have OVR -> drive directly
+    if (fmt === 'ovr15' && visemeTargets.length) {
+      for (const t of visemeTargets) {
+        const inf = t.influences;
+        for (let i=0;i<15;i++) {
+          const idx = t.ovr[i];
+          if (idx != null) inf[idx] = out[i];
         }
       }
+      return;
     }
 
-    // ---------- audio queue + viseme sync ----------
-    const audioEl = $('#audioPlayer');
-    const audioQ = [];
-    let playing = false;
-    let activeFrames = [];  // [[15]]
-    let activeTimes = null; // [seconds] or null
-    let activeFmt = 'arkit15';
-    let activeUrl = null;
-    let visemeRAF = null;
-
-    function lerpFrame(a, b, t) {
-      const out = new Array(15).fill(0);
-      const tt = Math.max(0, Math.min(1, t));
-      for (let i=0;i<15;i++) {
-        const av = Number(a?.[i] ?? 0);
-        const bv = Number(b?.[i] ?? 0);
-        out[i] = av + (bv - av) * tt;
+    // fmt is OVR but only ARKit exists -> convert
+    if (fmt === 'ovr15' && arkitTargets.length && !visemeTargets.length) {
+      const vals = ovrToArkit(out);
+      for (const t of arkitTargets) {
+        const d = t.a, inf = t.influences;
+        if (d.jawOpen      != null) inf[d.jawOpen]      = vals[0];
+        if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = vals[1];
+        if (d.mouthClose   != null) inf[d.mouthClose]   = vals[2];
+        if (d.mouthPucker  != null) inf[d.mouthPucker]  = vals[3];
       }
-      return out;
     }
+  }
 
-    function startVisemeLoop(){
-      stopVisemeLoop();
-      let lastIdx = 0;
-      const step = () => {
-        if (!activeFrames.length || !isFinite(audioEl.duration) || audioEl.duration <= 0) {
-          visemeRAF = requestAnimationFrame(step);
-          return;
-        }
+  // ---------- audio queue + viseme sync ----------
+  const audioEl = $('#audioPlayer');
+  const audioQ = [];
+  let playing = false;
+  let activeFrames = [];  // [[15]]
+  let activeTimes = null; // [seconds] or null
+  let activeFmt = 'arkit15';
+  let activeUrl = null;
+  let visemeRAF = null;
 
-        const t = audioEl.currentTime;
+  function lerpFrame(a, b, t) {
+    const out = new Array(15).fill(0);
+    const tt = Math.max(0, Math.min(1, t));
+    for (let i=0;i<15;i++) {
+      const av = Number(a?.[i] ?? 0);
+      const bv = Number(b?.[i] ?? 0);
+      out[i] = av + (bv - av) * tt;
+    }
+    return out;
+  }
 
-        if (activeTimes && activeTimes.length === activeFrames.length) {
-          // time-based with interpolation
-          const times = activeTimes;
-          // clamp
-          if (t <= times[0]) {
-            applyVisemeFrame(activeFrames[0], activeFmt);
-          } else if (t >= times[times.length - 1]) {
-            applyVisemeFrame(activeFrames[activeFrames.length - 1], activeFmt);
-          } else {
-            // advance pointer
-            while (lastIdx < times.length - 2 && t >= times[lastIdx + 1]) lastIdx++;
-            const t0 = times[lastIdx];
-            const t1 = times[lastIdx + 1];
-            const f0 = activeFrames[lastIdx];
-            const f1 = activeFrames[lastIdx + 1];
-            const alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0;
-            applyVisemeFrame(lerpFrame(f0, f1, alpha), activeFmt);
-          }
-        } else {
-          // fallback: map by fraction (kept as a last resort)
-          const frac = Math.min(0.9999, Math.max(0, t / audioEl.duration));
-          const idx = Math.floor(frac * activeFrames.length);
-          applyVisemeFrame(activeFrames[idx] || activeFrames[activeFrames.length-1], activeFmt);
-        }
-
+  function startVisemeLoop(){
+    stopVisemeLoop();
+    let lastIdx = 0;
+    const step = () => {
+      if (!activeFrames.length || !isFinite(audioEl.duration) || audioEl.duration <= 0) {
         visemeRAF = requestAnimationFrame(step);
-      };
+        return;
+      }
+
+      const t = audioEl.currentTime;
+
+      if (activeTimes && activeTimes.length === activeFrames.length) {
+        // time-based with interpolation
+        const times = activeTimes;
+        // clamp
+        if (t <= times[0]) {
+          applyVisemeFrame(activeFrames[0], activeFmt);
+        } else if (t >= times[times.length - 1]) {
+          applyVisemeFrame(activeFrames[activeFrames.length - 1], activeFmt);
+        } else {
+          // advance pointer
+          while (lastIdx < times.length - 2 && t >= times[lastIdx + 1]) lastIdx++;
+          const t0 = times[lastIdx];
+          const t1 = times[lastIdx + 1];
+          const f0 = activeFrames[lastIdx];
+          const f1 = activeFrames[lastIdx + 1];
+          const alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0;
+          applyVisemeFrame(lerpFrame(f0, f1, alpha), activeFmt);
+        }
+      } else {
+        // fallback: map by fraction
+        const frac = Math.min(0.9999, Math.max(0, t / audioEl.duration));
+        const idx = Math.floor(frac * activeFrames.length);
+        applyVisemeFrame(activeFrames[idx] || activeFrames[activeFrames.length-1], activeFmt);
+      }
+
       visemeRAF = requestAnimationFrame(step);
+    };
+    visemeRAF = requestAnimationFrame(step);
+  }
+  function stopVisemeLoop(){
+    if (visemeRAF) cancelAnimationFrame(visemeRAF);
+    visemeRAF = null;
+  }
+
+  function clearAudioQueue() {
+    try { audioEl.pause(); } catch {}
+    audioEl.removeAttribute('src');
+    audioEl.load();
+    while (audioQ.length) {
+      const item = audioQ.shift();
+      if (item?.url) { try { URL.revokeObjectURL(item.url); } catch {} }
     }
-    function stopVisemeLoop(){
-      if (visemeRAF) cancelAnimationFrame(visemeRAF);
-      visemeRAF = null;
+    playing = false;
+    activeFrames = [];
+    activeTimes = null;
+    activeUrl = null;
+    activeFmt = 'arkit15';
+    stopVisemeLoop();
+    resetMorphs();
+  }
+
+  function queueAudio(b64, framesSpec, fmt='arkit15', info='') {
+    try {
+      const mime = $('#playbackMime').value;
+      const blob = b64ToBlob(b64, mime);
+      const url = URL.createObjectURL(blob);
+
+      // framesSpec can be array (frames) OR {frames, times?, fps?}
+      let frames = [];
+      let times = null;
+      if (Array.isArray(framesSpec)) {
+        frames = framesSpec;
+      } else if (framesSpec && typeof framesSpec === 'object') {
+        frames = Array.isArray(framesSpec.frames) ? framesSpec.frames : [];
+        if (Array.isArray(framesSpec.times)) times = framesSpec.times.map(Number);
+        const fps = Number(framesSpec.fps || framesSpec.viseme_fps || 0);
+        if (!times && fps > 0 && frames.length) {
+          times = frames.map((_, i) => i / fps);
+        }
+      }
+
+      audioQ.push({ url, frames, times, fmt });
+      logLine($('#audioLog'), `[${now()}] queued (${mime}) fmt=${fmt} frames=${frames.length} ${info}`);
+      playNext();
+    } catch (e) {
+      logLine($('#audioLog'), `[${now()}] ! queue error: ${e}`);
+    }
+  }
+
+  function playNext(){
+    if (playing || !audioQ.length) return;
+    playing = true;
+
+    const item = audioQ.shift();
+    activeFrames = item.frames || [];
+    activeTimes = Array.isArray(item.times) ? item.times : null;
+    activeUrl = item.url;
+    activeFmt = item.fmt || 'arkit15';
+
+    // Ensure zero start/end padding if backend didn’t send it
+    if (activeFrames.length) {
+      const isZero = (f) => !f || f.every(v => Number(v||0) === 0);
+      if (!isZero(activeFrames[0])) activeFrames = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], ...activeFrames];
+      if (!isZero(activeFrames[activeFrames.length-1])) activeFrames = [...activeFrames, [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]];
+      if (activeTimes && activeTimes.length === (activeFrames.length - 2)) {
+        // If we padded frames but not times, extend times a hair at both ends
+        const head = Math.max(0, activeTimes[0] - 0.02);
+        const tail = activeTimes[activeTimes.length - 1] + 0.02;
+        activeTimes = [head, ...activeTimes, tail];
+      }
     }
 
-    function clearAudioQueue() {
-      try { audioEl.pause(); } catch {}
-      audioEl.removeAttribute('src');
-      audioEl.load();
-      while (audioQ.length) {
-        const item = audioQ.shift();
-        if (item?.url) { try { URL.revokeObjectURL(item.url); } catch {} }
+    audioEl.src = item.url;
+    audioEl.onloadedmetadata = () => {
+      if (!activeTimes && activeFrames.length && isFinite(audioEl.duration) && audioEl.duration > 0) {
+        // last-resort: spread frames across actual audio duration
+        const dur = audioEl.duration;
+        activeTimes = activeFrames.map((_, i) => (i / Math.max(1, activeFrames.length - 1)) * dur);
       }
+      const effFps = (activeTimes && activeTimes.length > 1)
+        ? (activeTimes.length - 1) / (activeTimes[activeTimes.length - 1] - activeTimes[0])
+        : (activeFrames.length / Math.max(0.001, audioEl.duration));
+      logLine($('#audioLog'), `[${now()}] ▶ playing dur=${audioEl.duration.toFixed(2)}s ~${effFps.toFixed(1)} fps fmt=${activeFmt}`);
+    };
+    audioEl.onended = audioEl.onerror = () => {
+      try { if (activeUrl) URL.revokeObjectURL(activeUrl); } catch {}
       playing = false;
       activeFrames = [];
       activeTimes = null;
-      activeUrl = null;
-      activeFmt = 'arkit15';
       stopVisemeLoop();
       resetMorphs();
-    }
-
-    function queueAudio(b64, framesSpec, fmt='arkit15', info='') {
-      try {
-        const mime = $('#playbackMime').value;
-        const blob = b64ToBlob(b64, mime);
-        const url = URL.createObjectURL(blob);
-
-        // framesSpec can be array (frames) OR {frames, times?, fps?}
-        let frames = [];
-        let times = null;
-        if (Array.isArray(framesSpec)) {
-          frames = framesSpec;
-        } else if (framesSpec && typeof framesSpec === 'object') {
-          frames = Array.isArray(framesSpec.frames) ? framesSpec.frames : [];
-          if (Array.isArray(framesSpec.times)) times = framesSpec.times.map(Number);
-          const fps = Number(framesSpec.fps || framesSpec.viseme_fps || 0);
-          if (!times && fps > 0 && frames.length) {
-            times = frames.map((_, i) => i / fps);
-          }
-        }
-
-        audioQ.push({ url, frames, times, fmt });
-        logLine($('#audioLog'), `[${now()}] queued (${mime}) fmt=${fmt} frames=${frames.length} ${info}`);
-        playNext();
-      } catch (e) {
-        logLine($('#audioLog'), `[${now()}] ! queue error: ${e}`);
-      }
-    }
-
-    function playNext(){
-      if (playing || !audioQ.length) return;
-      playing = true;
-
-      const item = audioQ.shift();
-      activeFrames = item.frames || [];
-      activeTimes = Array.isArray(item.times) ? item.times : null;
-      activeUrl = item.url;
-      activeFmt = item.fmt || 'arkit15';
-
-      // Ensure zero start/end padding if backend didn’t send it
-      if (activeFrames.length) {
-        const isZero = (f) => !f || f.every(v => Number(v||0) === 0);
-        if (!isZero(activeFrames[0])) activeFrames = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], ...activeFrames];
-        if (!isZero(activeFrames[activeFrames.length-1])) activeFrames = [...activeFrames, [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]];
-        if (activeTimes && activeTimes.length === (activeFrames.length - 2)) {
-          // If we padded frames but not times, extend times a hair at both ends
-          const head = Math.max(0, activeTimes[0] - 0.02);
-          const tail = activeTimes[activeTimes.length - 1] + 0.02;
-          activeTimes = [head, ...activeTimes, tail];
-        }
-      }
-
-      audioEl.src = item.url;
-      audioEl.onloadedmetadata = () => {
-        if (!activeTimes && activeFrames.length && isFinite(audioEl.duration) && audioEl.duration > 0) {
-          // last-resort: spread frames across actual audio duration
-          const dur = audioEl.duration;
-          activeTimes = activeFrames.map((_, i) => (i / Math.max(1, activeFrames.length - 1)) * dur);
-        }
-        const effFps = (activeTimes && activeTimes.length > 1)
-          ? (activeTimes.length - 1) / (activeTimes[activeTimes.length - 1] - activeTimes[0])
-          : (activeFrames.length / Math.max(0.001, audioEl.duration));
-        logLine($('#audioLog'), `[${now()}] ▶ playing dur=${audioEl.duration.toFixed(2)}s ~${effFps.toFixed(1)} fps fmt=${activeFmt}`);
-      };
-      audioEl.onended = audioEl.onerror = () => {
-        try { if (activeUrl) URL.revokeObjectURL(activeUrl); } catch {}
-        playing = false;
-        activeFrames = [];
-        activeTimes = null;
-        stopVisemeLoop();
-        resetMorphs();
-        playNext();
-      };
-      audioEl.onplay = () => startVisemeLoop();
-      audioEl.onpause = () => stopVisemeLoop();
-
-      audioEl.play().catch(err => {
-        logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
-        playing = false;
-        resetMorphs();
-      });
-    }
-
-    // ---------- WS wiring ----------
-    $('#loadAvatarBtn').onclick = (e) => {
-      e.preventDefault();
-      const url = $('#glbUrl').value.trim();
-      if (!url) { alert('Provide a Ready Player Me GLB URL'); return; }
-      loadAvatar(url);
+      playNext();
     };
+    audioEl.onplay = () => startVisemeLoop();
+    audioEl.onpause = () => stopVisemeLoop();
 
-    // Test mouth button (ARKit: jawOpen = 1 for 600ms)
-    $('#btnVisemeTest').onclick = (e) => {
-      e.preventDefault();
-      const f = new Array(15).fill(0); f[0] = 1; // jawOpen
-      applyVisemeFrame(f, 'arkit15');
-      setTimeout(() => applyVisemeFrame(new Array(15).fill(0), 'arkit15'), 600);
+    audioEl.play().catch(err => {
+      logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
+      playing = false;
+      resetMorphs();
+    });
+  }
+
+  // ---------- WS wiring ----------
+  $('#loadAvatarBtn').onclick = (e) => {
+    e.preventDefault();
+    const url = $('#glbUrl').value.trim();
+    if (!url) { alert('Provide a Ready Player Me GLB URL'); return; }
+    loadAvatar(url);
+  };
+
+  // Test mouth button (ARKit: jawOpen = 1 for 600ms)
+  $('#btnVisemeTest').onclick = (e) => {
+    e.preventDefault();
+    const f = new Array(15).fill(0); f[0] = 1; // jawOpen
+    applyVisemeFrame(f, 'arkit15');
+    setTimeout(() => applyVisemeFrame(new Array(15).fill(0), 'arkit15'), 600);
+  };
+
+  $('#connectBtn').onclick = (e) => {
+    e.preventDefault();
+    const bot=$('#botId').value.trim(), thr=$('#threadId').value.trim(), key=$('#apiKey').value.trim();
+    if (!bot || !thr || !key) { alert('bot_id, thread_id, api key required'); return; }
+    $('#threadId').value = normalizeThreadId(thr);
+    setAuthCookie();
+    const url = buildWsUrl();
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      setBadge(true);
+      $('#sendBtn').disabled = false;
+      $('#disconnectBtn').disabled = false;
+      $('#btnPing').disabled = false;
+      $('#btnToggleMute').disabled = false;
+      $('#btnStopAudio').disabled = false;
+      $('#pttButton').disabled = false;
+      updateMicPermBadge(); // reflect current permission right away
+      logLine($('#evtLog'), `[${now()}] open ${url}`);
     };
-
-    $('#connectBtn').onclick = (e) => {
-      e.preventDefault();
-      const bot=$('#botId').value.trim(), thr=$('#threadId').value.trim(), key=$('#apiKey').value.trim();
-      if (!bot || !thr || !key) { alert('bot_id, thread_id, api key required'); return; }
-      $('#threadId').value = normalizeThreadId(thr);
-      setAuthCookie();
-      const url = buildWsUrl();
-      ws = new WebSocket(url);
-      ws.onopen = () => {
-        setBadge(true);
-        $('#sendBtn').disabled = false;
-        $('#disconnectBtn').disabled = false;
-        $('#btnPing').disabled = false;
-        $('#btnToggleMute').disabled = false;
-        $('#btnStopAudio').disabled = false;
-        $('#pttButton').disabled = false;
-        updateMicPermBadge(); // reflect current permission right away
-        logLine($('#evtLog'), `[${now()}] open ${url}`);
-      };
-      ws.onclose = (ev) => {
-        setBadge(false);
-        $('#sendBtn').disabled = true;
-        $('#disconnectBtn').disabled = true;
-        $('#btnPing').disabled = true;
-        $('#btnToggleMute').disabled = true;
-        $('#btnStopAudio').disabled = true;
-        $('#pttButton').disabled = true;
-        logLine($('#evtLog'), `[${now()}] close code=${ev.code}`);
-        clearAudioQueue();
-      };
-      ws.onerror = (ev) => logLine($('#evtLog'), `[${now()}] error ${ev?.message || ''}`);
-
-      ws.onmessage = (evt) => {
-        let msg = {};
-        try { msg = JSON.parse(evt.data || '{}'); } catch { msg = {}; }
-        const t = msg.type || '';
-        switch (t) {
-          case 'connected':
-            logLine($('#evtLog'), `[${now()}] connected bot=${msg.bot_id} thread=${msg.thread_id}`);
-            break;
-
-          case 'response_start':
-            logLine($('#evtLog'), `[${now()}] response_start`);
-            break;
-
-          case 'audio_muted':
-            setAudioBadge(!!msg.muted);
-            logLine($('#evtLog'), `[${now()}] audio_muted=${!!msg.muted}`);
-            break;
-
-          case 'stop_audio':
-            clearAudioQueue();
-            logLine($('#evtLog'), `[${now()}] stop_audio`);
-            break;
-
-          case 'text_token': {
-            const tok = (msg.token || '').toString();
-            $('#textTokens').textContent += tok;
-            $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
-            break;
-          }
-
-          case 'emotion': {
-            const e = msg.emotion || {};
-            setEmotionBadge(e.name, e.intensity);
-            logLine($('#evtLog'), `[${now()}] emotion ${JSON.stringify(e)}`);
-            break;
-          }
-
-          case 'slides_response': {
-            const payload = ('slides' in msg) ? {slides: msg.slides}
-                          : ('slides_raw' in msg) ? {slides_raw: msg.slides_raw} : msg;
-            const pretty = JSON.stringify(payload, null, 2);
-            logLine($('#slidesLog'), pretty + "\n");
-            break;
-          }
-
-          case 'slides_done':
-            logLine($('#slidesLog'), `-- slides_done --`);
-            break;
-
-          case 'audio_response': {
-            const b64 = msg.audio || '';
-            const frames = Array.isArray(msg.viseme) ? msg.viseme : [];
-            const fmt = (msg.viseme_format || 'arkit15').toLowerCase();
-
-            // Prefer explicit timing from backend (seconds). Else use viseme_fps.
-            const times = Array.isArray(msg.viseme_times) ? msg.viseme_times.map(Number) : null;
-            const fps = Number(msg.viseme_fps || 0);
-
-            const framesSpec = times ? { frames, times } : (fps > 0 ? { frames, fps } : frames);
-
-            const preview = typeof b64 === 'string'
-              ? (b64.startsWith('data:') ? b64.split(',')[1] || '' : b64)
-              : '';
-            const head = preview.slice(0, 96);
-
-            queueAudio(b64, framesSpec, fmt, `head=${head}…`);
-            break;
-          }
-
-          case 'response_done':
-            logLine($('#evtLog'), `[${now()}] response_done timings=${JSON.stringify(msg.timings || {})}`);
-            break;
-
-          case 'response_ended':
-            logLine($('#evtLog'), `[${now()}] response_ended`);
-            break;
-
-          case 'text_query':
-            logLine($('#evtLog'), `[${now()}] echo text_query "${(msg.text||'').slice(0,200)}"`);
-            break;
-
-          case 'pong':
-            logLine($('#evtLog'), `[${now()}] pong`);
-            break;
-
-          case 'error':
-            logLine($('#evtLog'), `[${now()}] ERROR ${msg.message || 'unknown'}`);
-            break;
-
-          default:
-            logLine($('#evtLog'), `[${now()}] ${t || 'unknown'} ${JSON.stringify(msg)}`);
-        }
-      };
-    };
-
-    $('#disconnectBtn').onclick = (e) => { e.preventDefault(); if (ws) { ws.close(); ws = null; } };
-    $('#btnPing').onclick = (e) => { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'ping'})); };
-    $('#btnToggleMute').onclick = (e) => {
-      e.preventDefault();
-      if (!ws || ws.readyState !== 1) return;
-      const nextMuted = !audioMuted;
-      ws.send(JSON.stringify({ type: nextMuted ? 'mute_audio' : 'unmute_audio' }));
-    };
-    $('#btnStopAudio').onclick = (e) => {
-      e.preventDefault();
-      if (!ws || ws.readyState !== 1) return;
-      ws.send(JSON.stringify({ type: 'stop_audio' }));
+    ws.onclose = (ev) => {
+      setBadge(false);
+      $('#sendBtn').disabled = true;
+      $('#disconnectBtn').disabled = true;
+      $('#btnPing').disabled = true;
+      $('#btnToggleMute').disabled = true;
+      $('#btnStopAudio').disabled = true;
+      $('#pttButton').disabled = true;
+      logLine($('#evtLog'), `[${now()}] close code=${ev.code}`);
       clearAudioQueue();
     };
+    ws.onerror = (ev) => logLine($('#evtLog'), `[${now()}] error ${ev?.message || ''}`);
 
-    $('#sendBtn').onclick = sendText;
-    $('#chatInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }});
-    function sendText(){
-      if (!ws || ws.readyState !== 1) return;
-      const text = $('#chatInput').value.trim();
-      if (!text) return;
-      const muted = $('#muteOnSend').checked;
-      ws.send(JSON.stringify({
-        type: 'text_query',
-        text,
-        local_time: new Date().toLocaleString(),
-        muteAudio: muted
-      }));
-      $('#chatInput').value = '';
-    }
+    ws.onmessage = (evt) => {
+      let msg = {};
+      try { msg = JSON.parse(evt.data || '{}'); } catch { msg = {}; }
+      const t = msg.type || '';
+      switch (t) {
+        case 'connected':
+          logLine($('#evtLog'), `[${now()}] connected bot=${msg.bot_id} thread=${msg.thread_id}`);
+          break;
 
-    // ---------- Push-to-Talk (hold/release) ----------
-    let mediaStream = null, recorder = null, chunks = [];
-    let recMime = 'audio/webm';
+        case 'response_start':
+          logLine($('#evtLog'), `[${now()}] response_start`);
+          break;
 
-    function pickRecorderMime() {
-      const candidates = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4;codecs=mp4a.40.2',
-        'audio/mp4',
-        'audio/ogg;codecs=opus',
-        'audio/ogg'
-      ];
-      for (const m of candidates) {
-        if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
-          return m;
+        case 'audio_muted':
+          setAudioBadge(!!msg.muted);
+          logLine($('#evtLog'), `[${now()}] audio_muted=${!!msg.muted}`);
+          break;
+
+        case 'stop_audio':
+          clearAudioQueue();
+          logLine($('#evtLog'), `[${now()}] stop_audio`);
+          break;
+
+        case 'text_token': {
+          const tok = (msg.token || '').toString();
+          $('#textTokens').textContent += tok;
+          $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
+          break;
         }
-      }
-      return 'audio/webm'; // fallback
-    }
 
-    async function ensureMic() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        return stream;
-      } catch (e) {
-        return null;
-      }
-    }
-
-    function updateMicPermBadge() {
-      const btn = $('#micPermBtn');
-      if (navigator.permissions && navigator.permissions.query) {
-        navigator.permissions.query({ name: 'microphone' }).then(st => {
-          const denied = st.state === 'denied';
-          btn.classList.toggle('hidden', !denied);
-          $('#micStatus').textContent = `mic: ${st.state}`;
-        }).catch(() => {});
-      }
-    }
-
-    async function startPTT() {
-      if (!ws || ws.readyState !== 1) return;
-      $('#pttButton').classList.add('ring-4','ring-emerald-300');
-      $('#micStatus').textContent = 'recording…';
-      try {
-        mediaStream = await ensureMic();
-        if (!mediaStream) {
-          $('#micStatus').textContent = 'mic blocked/denied';
-          $('#micPermBtn').classList.remove('hidden');
-          $('#pttButton').classList.remove('ring-4','ring-emerald-300');
-          return;
+        case 'emotion': {
+          const e = msg.emotion || {};
+          setEmotionBadge(e.name, e.intensity);
+          logLine($('#evtLog'), `[${now()}] emotion ${JSON.stringify(e)}`);
+          console.log('[emotion/raw]', msg);
+          window.__lastEmotion = msg;
+          break;
         }
-        recMime = pickRecorderMime();
-        recorder = new MediaRecorder(mediaStream, { mimeType: recMime, audioBitsPerSecond: 64000 });
-        chunks = [];
-        recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-        recorder.start();
-      } catch (e) {
-        $('#micStatus').textContent = `! mic error: ${e}`;
-        $('#micPermBtn').classList.remove('hidden');
-        $('#pttButton').classList.remove('ring-4','ring-emerald-300');
-      }
-    }
 
-    async function stopPTT(send=true) {
-      $('#pttButton').classList.remove('ring-4','ring-emerald-300');
-      try {
-        if (!recorder) { $('#micStatus').textContent = 'mic: idle'; return; }
-        await new Promise(res => { recorder.onstop = res; recorder.stop(); });
-        const blob = new Blob(chunks, { type: recMime });
-        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-        recorder = null; mediaStream = null;
-        const dataUrl = await blobToBase64(blob);
-        const b64 = (dataUrl.split(',')[1] || '');
-        if (send && ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({
-            type: 'audio_query',
-            audio: dataUrl,
-            format: (recMime.includes('mp4') ? 'm4a' : recMime.includes('ogg') ? 'ogg' : 'webm'),
-            muteAudio: $('#muteOnSend').checked
-          }));
-          logLine($('#evtLog'), `[${now()}] sent audio_query size=${b64.length} fmt=${recMime}`);
-          $('#micStatus').textContent = `sent (${(blob.size/1024).toFixed(1)} KB)`;
-        } else {
-          $('#micStatus').textContent = 'not connected';
+        case 'slides_response': {
+          const payload = ('slides' in msg) ? {slides: msg.slides}
+                        : ('slides_raw' in msg) ? {slides_raw: msg.slides_raw} : msg;
+          const pretty = JSON.stringify(payload, null, 2);
+          logLine($('#slidesLog'), pretty + "\n");
+          break;
         }
-      } catch (e3) {
-        $('#micStatus').textContent = `! send error: ${e3}`;
-      } finally {
-        chunks = [];
-        setTimeout(()=>$('#micStatus').textContent='mic: idle', 800);
-      }
-    }
 
-    // PTT bindings (mouse + touch)
-    const ptt = $('#pttButton');
-    ptt.addEventListener('mousedown', (e)=>{ e.preventDefault(); startPTT(); });
-    ptt.addEventListener('touchstart', (e)=>{ e.preventDefault(); startPTT(); }, {passive:false});
-    const finish = (e)=>{ e.preventDefault(); stopPTT(true); };
-    ptt.addEventListener('mouseup', finish);
-    ptt.addEventListener('mouseleave', (e)=>{ if (recorder) stopPTT(true); });
-    ptt.addEventListener('touchend', finish, {passive:false});
-    ptt.addEventListener('touchcancel', (e)=>{ e.preventDefault(); stopPTT(false); }, {passive:false});
+        case 'slides_done':
+          logLine($('#slidesLog'), `-- slides_done --`);
+          break;
 
-    // Permission helper
-    $('#micPermBtn').onclick = async (e) => {
-      e.preventDefault();
-      $('#micStatus').textContent = 'requesting mic…';
-      const stream = await ensureMic();
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        $('#micPermBtn').classList.add('hidden');
-        $('#micStatus').textContent = 'mic: granted';
-      } else {
-        $('#micStatus').textContent = 'mic: denied';
+        case 'audio_response': {
+          const b64 = msg.audio || '';
+          const frames = Array.isArray(msg.viseme) ? msg.viseme : [];
+          console.log('frames:', frames);
+          const fmt = (msg.viseme_format || 'arkit15').toLowerCase();
+
+          // Prefer explicit timing (seconds). Else synthesize from fps.
+          const times = Array.isArray(msg.viseme_times) ? msg.viseme_times.map(Number) : null;
+          const fps = Number(msg.viseme_fps || 0);
+
+          const framesSpec = times ? { frames, times }
+                          : (fps > 0 ? { frames, fps } : frames);
+
+          const preview = typeof b64 === 'string'
+            ? (b64.startsWith('data:') ? b64.split(',')[1] || '' : b64)
+            : '';
+          const head = preview.slice(0, 96);
+
+          console.groupCollapsed('[audio_response/raw]');
+          console.log('format:', fmt);
+          console.log('frames(len):', frames.length);
+          if (times) console.log('times[0..3]:', times.slice(0,4));
+          if (fps) console.log('fps:', fps);
+          console.log('audio head:', head);
+          console.groupEnd();
+          window.__lastViseme = { fmt, framesLen: frames.length, times, fps, head };
+
+          queueAudio(b64, framesSpec, fmt, `head=${head}…`);
+          break;
+        }
+
+        case 'response_done':
+          logLine($('#evtLog'), `[${now()}] response_done timings=${JSON.stringify(msg.timings || {})}`);
+          break;
+
+        case 'response_ended':
+          logLine($('#evtLog'), `[${now()}] response_ended`);
+          break;
+
+        case 'text_query':
+          logLine($('#evtLog'), `[${now()}] echo text_query "${(msg.text||'').slice(0,200)}"`);
+          break;
+
+        case 'pong':
+          logLine($('#evtLog'), `[${now()}] pong`);
+          break;
+
+        case 'error':
+          logLine($('#evtLog'), `[${now()}] ERROR ${msg.message || 'unknown'}`);
+          break;
+
+        default:
+          logLine($('#evtLog'), `[${now()}] ${t || 'unknown'} ${JSON.stringify(msg)}`);
       }
     };
+  };
 
-    // panel copy/clear
-    $('#textCopy').onclick = ()=>copyText($('#textTokens'));
-    $('#textClear').onclick = ()=>clearEl($('#textTokens'));
-    $('#slidesCopy').onclick = ()=>copyText($('#slidesLog'));
-    $('#slidesClear').onclick = ()=>clearEl($('#slidesLog'));
-    $('#audioCopy').onclick = ()=>copyText($('#audioLog'));
-    $('#audioClear').onclick = ()=>{ clearEl($('#audioLog')); clearAudioQueue(); };
-    $('#evtCopy').onclick = ()=>copyText($('#evtLog'));
-    $('#evtClear').onclick = ()=>clearEl($('#evtLog'));
+  $('#disconnectBtn').onclick = (e) => { e.preventDefault(); if (ws) { ws.close(); ws = null; } };
+  $('#btnPing').onclick = (e) => { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'ping'})); };
+  $('#btnToggleMute').onclick = (e) => {
+    e.preventDefault();
+    if (!ws || ws.readyState !== 1) return;
+    const nextMuted = !audioMuted;
+    ws.send(JSON.stringify({ type: nextMuted ? 'mute_audio' : 'unmute_audio' }));
+  };
+  $('#btnStopAudio').onclick = (e) => {
+    e.preventDefault();
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: 'stop_audio' }));
+    clearAudioQueue();
+  };
 
-    // boot
-    initThree();
-    updateMicPermBadge();
-  </script>
+  $('#sendBtn').onclick = sendText;
+  $('#chatInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }});
+  function sendText(){
+    if (!ws || ws.readyState !== 1) return;
+    const text = $('#chatInput').value.trim();
+    if (!text) return;
+    const muted = $('#muteOnSend').checked;
+    ws.send(JSON.stringify({
+      type: 'text_query',
+      text,
+      local_time: new Date().toLocaleString(),
+      muteAudio: muted
+    }));
+    $('#chatInput').value = '';
+  }
+
+  // ---------- Push-to-Talk (hold/release) ----------
+  let mediaStream = null, recorder = null, chunks = [];
+  let recMime = 'audio/webm';
+
+  function pickRecorderMime() {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+      'audio/ogg;codecs=opus',
+      'audio/ogg'
+    ];
+    for (const m of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
+        return m;
+      }
+    }
+    return 'audio/webm'; // fallback
+  }
+
+  async function ensureMic() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return stream;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function updateMicPermBadge() {
+    const btn = $('#micPermBtn');
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'microphone' }).then(st => {
+        const denied = st.state === 'denied';
+        btn.classList.toggle('hidden', !denied);
+        $('#micStatus').textContent = `mic: ${st.state}`;
+      }).catch(() => {});
+    }
+  }
+
+  async function startPTT() {
+    if (!ws || ws.readyState !== 1) return;
+    $('#pttButton').classList.add('ring-4','ring-emerald-300');
+    $('#micStatus').textContent = 'recording…';
+    try {
+      mediaStream = await ensureMic();
+      if (!mediaStream) {
+        $('#micStatus').textContent = 'mic blocked/denied';
+        $('#micPermBtn').classList.remove('hidden');
+        $('#pttButton').classList.remove('ring-4','ring-emerald-300');
+        return;
+      }
+      recMime = pickRecorderMime();
+      recorder = new MediaRecorder(mediaStream, { mimeType: recMime, audioBitsPerSecond: 64000 });
+      chunks = [];
+      recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+      recorder.start();
+    } catch (e) {
+      $('#micStatus').textContent = `! mic error: ${e}`;
+      $('#micPermBtn').classList.remove('hidden');
+      $('#pttButton').classList.remove('ring-4','ring-emerald-300');
+    }
+  }
+
+  async function stopPTT(send=true) {
+    $('#pttButton').classList.remove('ring-4','ring-emerald-300');
+    try {
+      if (!recorder) { $('#micStatus').textContent = 'mic: idle'; return; }
+      await new Promise(res => { recorder.onstop = res; recorder.stop(); });
+      const blob = new Blob(chunks, { type: recMime });
+      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      recorder = null; mediaStream = null;
+      const dataUrl = await blobToBase64(blob);
+      const b64 = (dataUrl.split(',')[1] || '');
+      if (send && ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: 'audio_query',
+          audio: dataUrl,
+          format: (recMime.includes('mp4') ? 'm4a' : recMime.includes('ogg') ? 'ogg' : 'webm'),
+          muteAudio: $('#muteOnSend').checked
+        }));
+        logLine($('#evtLog'), `[${now()}] sent audio_query size=${b64.length} fmt=${recMime}`);
+        $('#micStatus').textContent = `sent (${(blob.size/1024).toFixed(1)} KB)`;
+      } else {
+        $('#micStatus').textContent = 'not connected';
+      }
+    } catch (e3) {
+      $('#micStatus').textContent = `! send error: ${e3}`;
+    } finally {
+      chunks = [];
+      setTimeout(()=>$('#micStatus').textContent='mic: idle', 800);
+    }
+  }
+
+  // PTT bindings (mouse + touch)
+  const ptt = $('#pttButton');
+  ptt.addEventListener('mousedown', (e)=>{ e.preventDefault(); startPTT(); });
+  ptt.addEventListener('touchstart', (e)=>{ e.preventDefault(); startPTT(); }, {passive:false});
+  const finish = (e)=>{ e.preventDefault(); stopPTT(true); };
+  ptt.addEventListener('mouseup', finish);
+  ptt.addEventListener('mouseleave', (e)=>{ if (recorder) stopPTT(true); });
+  ptt.addEventListener('touchend', finish, {passive:false});
+  ptt.addEventListener('touchcancel', (e)=>{ e.preventDefault(); stopPTT(false); }, {passive:false});
+
+  // Permission helper
+  $('#micPermBtn').onclick = async (e) => {
+    e.preventDefault();
+    $('#micStatus').textContent = 'requesting mic…';
+    const stream = await ensureMic();
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      $('#micPermBtn').classList.add('hidden');
+      $('#micStatus').textContent = 'mic: granted';
+    } else {
+      $('#micStatus').textContent = 'mic: denied';
+    }
+  };
+
+  // panel copy/clear
+  $('#textCopy').onclick = ()=>copyText($('#textTokens'));
+  $('#textClear').onclick = ()=>clearEl($('#textTokens'));
+  $('#slidesCopy').onclick = ()=>copyText($('#slidesLog'));
+  $('#slidesClear').onclick = ()=>clearEl($('#slidesLog'));
+  $('#audioCopy').onclick = ()=>copyText($('#audioLog'));
+  $('#audioClear').onclick = ()=>{ clearEl($('#audioLog')); clearAudioQueue(); };
+  $('#evtCopy').onclick = ()=>copyText($('#evtLog'));
+  $('#evtClear').onclick = ()=>clearEl($('#evtLog'));
+
+  // boot
+  initThree();
+  updateMicPermBadge();
+</script>
+
 </body>
 </html>

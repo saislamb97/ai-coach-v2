@@ -57,7 +57,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
       - connected
       - response_start
       - text_token {token, local_time}
-      - audio_response {audio, viseme, local_time}
+      - audio_response {audio, viseme, viseme_format?, local_time}
       - emotion {emotion: {name, intensity}, local_time}
       - slides_response {slides, local_time}
       - slides_done
