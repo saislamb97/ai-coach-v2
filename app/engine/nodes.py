@@ -42,12 +42,10 @@ class Settings:
     emotion_model: str = "gpt-4o-mini"
     emotion_timeout_s: float = 6.0
     viseme_max_frames_to_store: int = 8000
-    vis_fps_env: int = int(os.getenv("VIS_FPS", "60"))
     # Optional knob if you later want to change where the pre-text emotion comes from.
     emotion_source: str = os.getenv("EMOTION_SOURCE", "query")  # "query" | "none"
 
 S = Settings()
-FRAME_MS = max(10, int(round(1000.0 / max(1, S.vis_fps_env))))
 
 # =============================================================================
 # State
@@ -69,14 +67,19 @@ class QAState(TypedDict, total=False):
 
     text_finalized_event: asyncio.Event
     slides_ready_event: asyncio.Event
-    emotion_ready_event: asyncio.Event  # NEW: gate streaming until emotion is emitted
+    emotion_ready_event: asyncio.Event  # gate streaming until emotion is emitted
 
     slides_latest: Dict[str, Any]
     slides_tool_used: bool
 
     response: str
     emotion_final: Dict[str, Any]
+
+    # kept for simple aggregate previews/metrics
     viseme_frames: List[List[float]]
+
+    # NEW: store authoritative chunks (each with frames+times+format+durations)
+    viseme_chunks: List[Dict[str, Any]]
 
     turn_slides_context: str
     meta: Dict[str, Any]
@@ -145,13 +148,14 @@ async def n_prepare(state: QAState) -> QAState:
     state["slides_tool_used"] = False
     state["emotion_final"] = {}
     state["viseme_frames"] = []
+    state["viseme_chunks"] = []
     state["turn_slides_context"] = ""
 
     state["meta"] = {}
     state["timings"] = {"prepare_ms": elapsed_ms(t0)}
     state["text_finalized_event"] = asyncio.Event()
     state["slides_ready_event"] = asyncio.Event()
-    state["emotion_ready_event"] = asyncio.Event()  # NEW
+    state["emotion_ready_event"] = asyncio.Event()
     return state
 
 # =============================================================================
@@ -254,7 +258,7 @@ async def _emit_emotion_before_text(state: QAState):
 # Text streaming + sentence-level audio
 # =============================================================================
 async def _stream_text_with_audio(state: QAState):
-    # IMPORTANT: wait for tools (slides) AND emotion before any text token goes out
+    # wait for tools (slides) AND emotion before any text token goes out
     await asyncio.gather(
         state["slides_ready_event"].wait(),
         state["emotion_ready_event"].wait(),
@@ -301,29 +305,24 @@ async def _stream_text_with_audio(state: QAState):
             for s in sents:
                 try:
                     cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, s, "en_GB", SanitizeOptions())
-                    audio, visemes = await synthesize_tts_async(cleaned, voice_service, voice_id)
+                    audio, v = await synthesize_tts_async(cleaned, voice_service, voice_id)
 
-                    if visemes and visemes[0] != [0.0]*15:
-                        visemes = [[0.0]*15] + visemes
-                    if visemes and visemes[-1] != [0.0]*15:
-                        visemes = visemes + [[0.0]*15]
-                    times = [i * (FRAME_MS / 1000.0) for i in range(len(visemes))]
-                    fps = round(1000.0 / FRAME_MS, 3)
-
+                    # Forward exactly what the backend decided. No padding or recomputed timing here.
                     b64 = base64.b64encode(audio).decode("utf-8")
                     await state["queue"].put({
                         "type": "audio_response",
                         "audio": b64,
-                        "viseme": visemes,
-                        "viseme_format": "arkit15",
-                        "viseme_times": times,
-                        "viseme_fps": fps
+                        **v,  # viseme, viseme_times, viseme_format, viseme_fps, duration_ms, frame_ms
                     })
 
-                    if isinstance(visemes, list):
-                        state["viseme_frames"].extend(visemes)
+                    # Optional aggregation for analytics/persistence
+                    frames = v.get("viseme") or []
+                    if isinstance(frames, list):
+                        state["viseme_frames"].extend(frames)
                         if len(state["viseme_frames"]) > S.viseme_max_frames_to_store:
                             state["viseme_frames"] = state["viseme_frames"][-S.viseme_max_frames_to_store:]
+
+                    state["viseme_chunks"].append(v)
                 except Exception:
                     log.exception("[nodes:tts] sentence TTS failed")
 
@@ -332,29 +331,21 @@ async def _stream_text_with_audio(state: QAState):
     if tail and voice_service and voice_id and state.get("queue"):
         try:
             cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, tail, "en_GB", SanitizeOptions())
-            audio, visemes = await synthesize_tts_async(cleaned, voice_service, voice_id)
-
-            if visemes and visemes[0] != [0.0]*15:
-                visemes = [[0.0]*15] + visemes
-            if visemes and visemes[-1] != [0.0]*15:
-                visemes = visemes + [[0.0]*15]
-            times = [i * (FRAME_MS / 1000.0) for i in range(len(visemes))]
-            fps = round(1000.0 / FRAME_MS, 3)
+            audio, v = await synthesize_tts_async(cleaned, voice_service, voice_id)
 
             b64 = base64.b64encode(audio).decode("utf-8")
             await state["queue"].put({
                 "type": "audio_response",
                 "audio": b64,
-                "viseme": visemes,
-                "viseme_format": "arkit15",
-                "viseme_times": times,
-                "viseme_fps": fps
+                **v,
             })
 
-            if isinstance(visemes, list):
-                state["viseme_frames"].extend(visemes)
+            frames = v.get("viseme") or []
+            if isinstance(frames, list):
+                state["viseme_frames"].extend(frames)
                 if len(state["viseme_frames"]) > S.viseme_max_frames_to_store:
                     state["viseme_frames"] = state["viseme_frames"][-S.viseme_max_frames_to_store:]
+            state["viseme_chunks"].append(v)
         except Exception:
             log.exception("[nodes:tts] tail TTS failed")
 
@@ -377,6 +368,14 @@ async def n_run(state: QAState) -> QAState:
 async def n_finalize_and_persist(state: QAState) -> QAState:
     timings = dict(state.get("timings") or {})
     meta = dict(state.get("meta") or {})
+    # If we produced any viseme chunks, grab frame_ms from the first one for metadata convenience.
+    frame_ms_meta: Optional[int] = None
+    if state.get("viseme_chunks"):
+        try:
+            frame_ms_meta = int(state["viseme_chunks"][0].get("frame_ms") or 0) or None
+        except Exception:
+            frame_ms_meta = None
+
     meta.update({
         "schema": "engine.v8",
         "bot_id": state.get("bot_id"),
@@ -385,13 +384,17 @@ async def n_finalize_and_persist(state: QAState) -> QAState:
         "timings_ms": timings,
         "response_len": len(state.get("response") or ""),
         "tools": list(AGENT_TOOLS.keys()),
-        "frame_ms": FRAME_MS,
+        "frame_ms": frame_ms_meta,
         "slides_tool_used": bool(state.get("slides_tool_used")),
     })
 
-    viseme_json = {}
-    if state.get("viseme_frames"):
-        viseme_json = {"frame_ms": FRAME_MS, "frames": state["viseme_frames"]}
+    # Persist the authoritative chunks (timeline-aware), plus a stitched frame list for quick previews
+    viseme_json: Dict[str, Any] = {}
+    if state.get("viseme_chunks") or state.get("viseme_frames"):
+        viseme_json = {
+            "chunks": state.get("viseme_chunks") or [],
+            "frames_preview": state.get("viseme_frames") or [],
+        }
 
     try:
         await _persist_chat(

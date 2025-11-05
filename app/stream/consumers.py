@@ -57,7 +57,16 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
       - connected
       - response_start
       - text_token {token, local_time}
-      - audio_response {audio, viseme, viseme_format?, local_time}
+      - audio_response {
+            audio,                       # base64 (mp3)
+            viseme,                      # [[15]*N]
+            viseme_times,                # [seconds] aligned to viseme frames
+            viseme_format,               # "arkit15"
+            viseme_fps,                  # frames per second (float)
+            duration_ms,                 # audio duration in ms
+            frame_ms,                    # per-frame step in ms
+            local_time
+        }
       - emotion {emotion: {name, intensity}, local_time}
       - slides_response {slides, local_time}
       - slides_done
@@ -186,7 +195,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if "muteAudio" in data:
             self.audio_muted = bool(data.get("muteAudio"))
 
-        # new run resets stop flag
+        # new run resets stop flag (muted doesn't block viseme streaming)
         self.audio_stopped = False
 
         await self._cancel_current_run()
@@ -240,7 +249,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                     await self.send_json(out)
 
                 elif t == "audio_response":
-                    if self.audio_stopped or self.audio_muted:
+                    # IMPORTANT: still forward visemes while muted so lips sync continues.
+                    # Only suppress if explicitly stopped.
+                    if self.audio_stopped:
                         continue
                     item["local_time"] = browser_time
                     await self.send_json(item)

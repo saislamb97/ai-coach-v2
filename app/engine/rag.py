@@ -13,9 +13,9 @@ log = logging.getLogger(__name__)
 class Rag:
     """
     Thin façade used by WS/HTTP layers.
-    New pipeline (parallelized):
+    Pipeline (parallelized):
       1) n_prepare
-      2) n_run                 -> streams text tokens + emotion + TTS; tools run in parallel (slide deltas stream)
+      2) n_run                 -> streams text tokens + emotion + TTS/visemes; tools run in parallel (slides stream)
       3) n_finalize_and_persist
     """
 
@@ -25,7 +25,7 @@ class Rag:
         queue: Optional[asyncio.Queue] = None,
         limits=None,
         model: Optional[str] = None,
-        temperature: float = 0.3,  # maintained for parity
+        temperature: float = 0.3,  # kept for parity; nodes controls its own temps
     ):
         self.queue = queue
         self.limits = limits
