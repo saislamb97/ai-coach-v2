@@ -42,7 +42,7 @@ class Settings:
     emotion_model: str = "gpt-4o-mini"
     emotion_timeout_s: float = 6.0
     viseme_max_frames_to_store: int = 8000
-    vis_fps_env: int = int(os.getenv("VIS_FPS", "88"))
+    vis_fps_env: int = int(os.getenv("VIS_FPS", "60"))
 
 S = Settings()
 FRAME_MS = max(10, int(round(1000.0 / max(1, S.vis_fps_env))))

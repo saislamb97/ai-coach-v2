@@ -38,7 +38,7 @@ TARGET_DBFS = float(os.getenv("TARGET_DBFS", "-1.0"))
 # Viseme timing (frame period in ms; e.g., 60 FPS -> ~16.7 ms)
 # Keep this in sync with nodes.py FRAME_MS (both read VIS_FPS).
 # =============================================================================
-VIS_FPS = int(os.getenv("VIS_FPS", "88"))
+VIS_FPS = int(os.getenv("VIS_FPS", "60"))
 MS_PER_FRAME = max(10, int(round(1000.0 / max(1, VIS_FPS))))
 ARKIT_DIM = 15
 
