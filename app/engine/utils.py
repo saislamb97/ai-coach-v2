@@ -5,6 +5,7 @@ import regex
 from typing import Any, Dict, List, Optional, Tuple
 from textwrap import dedent
 from django.utils.html import strip_tags
+import json
 
 log = logging.getLogger(__name__)
 
@@ -82,45 +83,77 @@ def _flatten_editorjs_for_prompt(editorjs: Dict[str, Any], *, limit_blocks: int 
     return lines
 
 def build_slides_context(snap: Dict[str, Any]) -> str:
+    """
+    Produce a concise, LLM-friendly summary of the deck with an explicit, exhaustive
+    change list based ONLY on `snap["diff"]` (no backward compatibility).
+    """
     title = snap.get("title") or ""
     summary = snap.get("summary") or ""
     editorjs = snap.get("editorjs") or {}
-    blocks = (editorjs or {}).get("blocks") or []
 
     version = snap.get("version")
     updated_by = snap.get("updated_by") or ""
     updated_at = snap.get("updated_at") or ""
-    diff = snap.get("diff_headers") or {}
 
     lines: List[str] = []
 
     # CURRENT — the only source of truth
-    lines.append("## CURRENT DECK — SOURCE OF TRUTH (use ONLY this for facts)")
+    lines.append("## CURRENT DECK — SOURCE OF TRUTH")
     lines.append(f"Meta: v{version} • by {updated_by} • at {updated_at}")
     lines.append(f"Title: {title or '—'}")
     if summary:
         lines.append(f"Summary: {summary}")
-    if blocks:
-        lines.extend(_flatten_editorjs_for_prompt(editorjs))
-    else:
-        lines.append("[No current sections yet]")
+    flats = _flatten_editorjs_for_prompt(editorjs)
+    lines.extend(flats if flats else ["[No sections]"])
 
-    # CHANGELOG from diff_headers
-    adds = list(diff.get("added") or [])
-    rems = list(diff.get("removed") or [])
-    if adds or rems:
-        lines.append("\n## CHANGELOG (since previous)")
-        if adds:
-            lines.append("Added: " + ", ".join(adds[:10]))
-        if rems:
-            lines.append("Removed: " + ", ".join(rems[:10]))
+    # Exhaustive DIFF (CURRENT vs PREVIOUS)
+    d = snap.get("diff") or {}
+    if d:
+        lines.append("\n## DIFF (CURRENT vs PREVIOUS)")
+        fc = d.get("fields_changed", [])
+        lines.append("Fields changed: " + (", ".join(fc) if fc else "none"))
 
-    # PREVIOUS — history only
+        # Title / Summary diffs
+        tdiff = d.get("title") or {}
+        if tdiff.get("changed"):
+            lines.append(f"Title: '{tdiff.get('from','')}' -> '{tdiff.get('to','')}'")
+        sdiff = d.get("summary") or {}
+        if sdiff.get("changed"):
+            lines.append("Summary changed.")
+
+        # Editor.js ops
+        ej = d.get("editorjs") or {}
+        if ej.get("changed"):
+            bc = ej.get("block_count", {})
+            lines.append(f"Blocks: {bc.get('from',0)} -> {bc.get('to',0)}")
+
+            hdr = ej.get("headers", {})
+            if hdr.get("added"):
+                lines.append("Headers added: " + ", ".join(hdr["added"][:12]))
+            if hdr.get("removed"):
+                lines.append("Headers removed: " + ", ".join(hdr["removed"][:12]))
+            if hdr.get("renamed"):
+                for r in hdr["renamed"][:12]:
+                    lines.append(f"Header[{r.get('index')}]: '{r.get('from','')}' -> '{r.get('to','')}'")
+
+            # List ops (first 30 for brevity; caller has full JSON in slides)
+            ops = ej.get("ops", [])
+            for op in ops[:30]:
+                kind = op.get("op")
+                if kind == "update":
+                    lines.append(f"UPDATE[{op.get('index')}] {op.get('type')}: {json.dumps(op.get('changes'), ensure_ascii=False)}")
+                elif kind == "move":
+                    lines.append(f"MOVE {op.get('type')}: {op.get('from')} -> {op.get('to')}")
+                elif kind == "add":
+                    lines.append(f"ADD[{op.get('index')}] {op.get('type')}")
+                elif kind == "remove":
+                    lines.append(f"REMOVE[{op.get('index')}] {op.get('type')}")
+
+    # PREVIOUS — HISTORY ONLY (optional; does not feed current facts)
     prev = snap.get("previous") or {}
     prev_title = prev.get("title") or ""
     prev_summary = prev.get("summary") or ""
     prev_ej = prev.get("editorjs") or {}
-
     if prev_title or prev_summary or (prev_ej or {}).get("blocks"):
         lines.append("\n## PREVIOUS DECK — HISTORY ONLY (do NOT use for current facts)")
         if prev_title:
@@ -130,7 +163,7 @@ def build_slides_context(snap: Dict[str, Any]) -> str:
         lines.extend(_flatten_editorjs_for_prompt(prev_ej))
 
     out = "\n".join(lines)
-    return out[:6000] + ("\n…" if len(out) > 6000 else "")
+    return out[:8000] + ("\n…" if len(out) > 8000 else "")
 
 # -----------------------------------------------------------------------------
 # Prompts (strong slide-tool policy)
@@ -171,7 +204,7 @@ def build_text_system_prompt(*, bot_name: str, bot_id: str, instruction: Optiona
         - Never summarize “PREVIOUS DECK” unless the user asks for 'what changed', 'diff', 'previous', or 'history'.
         - If the current deck has no sections yet, say so explicitly (e.g., “Draft deck titled ‘X’ exists; no sections yet.”)
           Do NOT reuse previous content to describe the current deck.
-        - If a changelog is present, summarize it briefly on request.
+        - When describing changes, ONLY reference `slides.diff` (fields, headers, ops). Do not infer or invent.
         - Keep answers short and useful.
     """).strip()
 

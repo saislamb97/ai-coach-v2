@@ -43,6 +43,8 @@ class Settings:
     emotion_timeout_s: float = 6.0
     viseme_max_frames_to_store: int = 8000
     vis_fps_env: int = int(os.getenv("VIS_FPS", "60"))
+    # Optional knob if you later want to change where the pre-text emotion comes from.
+    emotion_source: str = os.getenv("EMOTION_SOURCE", "query")  # "query" | "none"
 
 S = Settings()
 FRAME_MS = max(10, int(round(1000.0 / max(1, S.vis_fps_env))))
@@ -67,6 +69,7 @@ class QAState(TypedDict, total=False):
 
     text_finalized_event: asyncio.Event
     slides_ready_event: asyncio.Event
+    emotion_ready_event: asyncio.Event  # NEW: gate streaming until emotion is emitted
 
     slides_latest: Dict[str, Any]
     slides_tool_used: bool
@@ -148,6 +151,7 @@ async def n_prepare(state: QAState) -> QAState:
     state["timings"] = {"prepare_ms": elapsed_ms(t0)}
     state["text_finalized_event"] = asyncio.Event()
     state["slides_ready_event"] = asyncio.Event()
+    state["emotion_ready_event"] = asyncio.Event()  # NEW
     return state
 
 # =============================================================================
@@ -207,11 +211,54 @@ async def _tool_router_and_stream(state: QAState):
     state["slides_ready_event"].set()
 
 # =============================================================================
+# Emotion (emit once BEFORE any text tokens)
+# =============================================================================
+async def _emit_emotion_before_text(state: QAState):
+    """
+    Compute ONE final emotion (from the user query) and emit it BEFORE any text tokens.
+    Guarantees the frontend can show the badge first.
+    """
+    try:
+        if S.emotion_source == "none":
+            emo = {"name": "Joy", "intensity": 1}
+        else:
+            tool = AGENT_TOOLS.get("emotion_analyze")
+            raw = getattr(state.get("user_msg"), "content", None) or (state.get("query") or "")
+            text = (raw or "").strip()
+            if not tool or not text:
+                emo = {"name": "Joy", "intensity": 1}
+            else:
+                res = await tool.ainvoke({"text": text})
+                name = str((res or {}).get("name", "Joy")).title()
+                intensity_val = (res or {}).get("intensity", 1)
+                try:
+                    intensity = int(intensity_val)
+                except Exception:
+                    intensity = 1
+                if name not in ("Joy", "Anger", "Sadness", "Surprise"):
+                    name = "Joy"
+                intensity = max(1, min(3, intensity))
+                emo = {"name": name, "intensity": intensity}
+
+        state["emotion_final"] = emo
+        if state.get("queue"):
+            await state["queue"].put({"type": "emotion", "emotion": emo})
+    except Exception:
+        log.exception("[nodes:emotion] pre-text emotion failed")
+        state["emotion_final"] = {"name": "Joy", "intensity": 1}
+    finally:
+        # Unblock the streamer
+        state["emotion_ready_event"].set()
+
+# =============================================================================
 # Text streaming + sentence-level audio
 # =============================================================================
 async def _stream_text_with_audio(state: QAState):
-    # IMPORTANT: wait for tools to finish so slide context is available before any text
-    await state["slides_ready_event"].wait()
+    # IMPORTANT: wait for tools (slides) AND emotion before any text token goes out
+    await asyncio.gather(
+        state["slides_ready_event"].wait(),
+        state["emotion_ready_event"].wait(),
+    )
 
     model_name = state.get("model") or "gpt-4o-mini"
     llm = ChatOpenAI(model=model_name, temperature=S.text_temperature, streaming=True)
@@ -315,42 +362,14 @@ async def _stream_text_with_audio(state: QAState):
     state["text_finalized_event"].set()
 
 # =============================================================================
-# Emotion (single result)
-# =============================================================================
-async def _emit_emotion_once(state: QAState):
-    await state["text_finalized_event"].wait()
-    text = (state.get("response") or "").strip()
-    if not text:
-        state["emotion_final"] = {"name": "Joy", "intensity": 1}
-        return
-
-    tool = AGENT_TOOLS.get("emotion_analyze")
-    if not tool:
-        state["emotion_final"] = {"name": "Joy", "intensity": 1}
-        return
-
-    try:
-        res = await tool.ainvoke({"text": text})
-        emo = {
-            "name": str(res.get("name", "Joy")).title(),
-            "intensity": int(res.get("intensity", 1)),
-        }
-        state["emotion_final"] = emo
-        if state.get("queue"):
-            await state["queue"].put({"type": "emotion", "emotion": emo})
-    except Exception:
-        log.exception("[nodes:emotion] tool failed")
-        state["emotion_final"] = {"name": "Joy", "intensity": 1}
-
-# =============================================================================
 # Run + finalize
 # =============================================================================
 async def n_run(state: QAState) -> QAState:
     t0 = time.perf_counter()
     await asyncio.gather(
-        _tool_router_and_stream(state),
-        _stream_text_with_audio(state),
-        _emit_emotion_once(state),
+        _tool_router_and_stream(state),   # prepares slides context
+        _emit_emotion_before_text(state), # emits single final emotion BEFORE any text
+        _stream_text_with_audio(state),   # waits on slides + emotion, then streams
     )
     state["timings"]["run_ms"] = elapsed_ms(t0)
     return state

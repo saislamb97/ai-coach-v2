@@ -5,6 +5,7 @@ import io
 import os
 import re
 import json
+import math
 import logging
 from io import BytesIO
 from time import perf_counter
@@ -43,19 +44,31 @@ VIS_FPS = int(os.getenv("VIS_FPS", "60"))
 MS_PER_FRAME = max(10, int(round(1000.0 / max(1, VIS_FPS))))
 ARKIT_DIM = 15  # ARKit-15 compact order used throughout
 
-# Amplitude shaping / smoothing
+# Amplitude shaping / smoothing (tuned defaults for slightly slower motion)
 VIS_GAIN = float(os.getenv("VIS_GAIN", "2.0"))
 VIS_GAMMA = float(os.getenv("VIS_GAMMA", "0.6"))
 VIS_MIN_FLOOR = float(os.getenv("VIS_MIN_FLOOR", "0.02"))
 VIS_SILENCE_DBFS = float(os.getenv("VIS_SILENCE_DBFS", "-55"))
-VIS_ATTACK_ALPHA = float(os.getenv("VIS_ATTACK_ALPHA", "0.55"))
-VIS_RELEASE_ALPHA = float(os.getenv("VIS_RELEASE_ALPHA", "0.70"))
 
-# Final shaping / scaling (NEW)
-# - VIS_COLUMN_GAIN: multiplies ALL 15 viseme columns uniformly before final autoscale.
-# - VIS_SHAPE_GAINS: per-column gains (JSON list of 15 floats, JSON dict {"0":1.1,...}, or CSV "1,1,...").
-# - VIS_TARGET_PEAK: target peak after autoscale; keeps motion big without clipping.
-# - VIS_HARD_CAP: maximum autoscale factor safeguard.
+# Stronger inertia: bigger alpha = stick to previous -> slower movement
+VIS_ATTACK_ALPHA = float(os.getenv("VIS_ATTACK_ALPHA", "0.72"))
+VIS_RELEASE_ALPHA = float(os.getenv("VIS_RELEASE_ALPHA", "0.86"))
+
+# Extra low-pass each frame (0..1, small). Higher = even slower/creamier motion.
+VIS_EXTRA_SMOOTH = float(os.getenv("VIS_EXTRA_SMOOTH", "0.15"))
+
+# Smooth the loudness envelope to avoid chattery jaw (frames)
+VIS_ENV_SMOOTH_WIN = int(os.getenv("VIS_ENV_SMOOTH_WIN", "5"))
+
+# L/R drift (natural asymmetry)
+VIS_DRIFT_PERIOD = int(os.getenv("VIS_DRIFT_PERIOD", "11"))  # frames per full cycle
+VIS_DRIFT_AMPL = float(os.getenv("VIS_DRIFT_AMPL", "0.12"))  # 0..~0.2 feels natural
+
+# Micro jitter (subtle, low-frequency life-like movement)
+VIS_MICRO_JITTER = float(os.getenv("VIS_MICRO_JITTER", "0.015"))  # 0..0.03 recommended
+VIS_MICRO_FREQ = float(os.getenv("VIS_MICRO_FREQ", "0.8"))        # Hz
+
+# Final shaping / scaling (kept)
 VIS_TARGET_PEAK = float(os.getenv("VIS_TARGET_PEAK", "0.85"))
 VIS_COLUMN_GAIN = float(os.getenv("VIS_COLUMN_GAIN", "1.00"))
 VIS_SHAPE_GAINS = os.getenv("VIS_SHAPE_GAINS", "").strip()
@@ -87,6 +100,29 @@ def _mp3_duration_ms(audio_bytes: bytes, fallback_ms: int) -> int:
         return int(seg.duration_seconds * 1000)
     except Exception:
         return fallback_ms
+
+def _moving_average(seq: List[float], win: int) -> List[float]:
+    if not seq or win <= 1:
+        return seq
+    win = max(2, min(win, len(seq)))
+    out: List[float] = []
+    acc = 0.0
+    buf: List[float] = []
+    for i, v in enumerate(seq):
+        buf.append(v)
+        acc += v
+        if len(buf) > win:
+            acc -= buf.pop(0)
+        out.append(acc / len(buf))
+    # light trailing pass to reduce head-start bias
+    if len(out) > 2:
+        out[-1] = (out[-1] + out[-2]) / 2.0
+    return out
+
+def _lf_sine(frame_idx: int, fps: int, freq_hz: float, phase: float = 0.0) -> float:
+    """Low-frequency sinusoid in [-1,1] for micro-motions."""
+    t = frame_idx / max(1, fps)
+    return math.sin(2.0 * math.pi * freq_hz * t + phase)
 
 # =============================================================================
 # Dense viseme synthesis (ARKit-15, ~duration / MS_PER_FRAME frames)
@@ -204,10 +240,18 @@ def _envelope_from_audio_dbfs(audio_bytes: bytes, frames: int) -> List[float]:
             ref = sorted(env)[max(0, int(0.9*(len(env)-1)))]
             ref = max(ref, 1e-3)
             env = [min(1.0, (e/ref)) for e in env]
-        return [min(1.0, VIS_GAIN * (e ** VIS_GAMMA)) for e in env]
+        # Gamma + gain shaping
+        env = [min(1.0, VIS_GAIN * (e ** VIS_GAMMA)) for e in env]
+        # NEW: smooth envelope to slow chatter
+        if VIS_ENV_SMOOTH_WIN > 1:
+            env = _moving_average(env, VIS_ENV_SMOOTH_WIN)
+        return env
     except Exception:
         # fallback trapezoid (durational ramp up/down)
-        return [min(1.0, max(0.0, (min(i, frames-1-i)/max(1, frames//2)))) for i in range(frames)]
+        raw = [min(1.0, max(0.0, (min(i, frames-1-i)/max(1, frames//2)))) for i in range(frames)]
+        if VIS_ENV_SMOOTH_WIN > 1:
+            raw = _moving_average(raw, VIS_ENV_SMOOTH_WIN)
+        return raw
 
 def _shape_for_class(cls: str, amp: float) -> List[float]:
     """
@@ -224,16 +268,20 @@ def _shape_for_class(cls: str, amp: float) -> List[float]:
 
 def _spread_lr(shape: List[float], amp: float, drift: float) -> None:
     """
-    Light per-frame asymmetry + cheek dynamics to avoid robotic symmetry.
+    Per-frame asymmetry + cheek dynamics to avoid robotic symmetry.
+    drift in [-1,1].
     """
-    shape[MOUTH_LEFT]     = 0.08 * amp * max(0.0, 1.0 - abs(drift))
-    shape[MOUTH_RIGHT]    = 0.08 * amp * max(0.0, 1.0 - abs(drift))
-    shape[MOUTH_DIMPLE_L] = min(1.0, shape[MOUTH_DIMPLE_L] + 0.03 * amp)
-    shape[MOUTH_DIMPLE_R] = min(1.0, shape[MOUTH_DIMPLE_R] + 0.03 * amp)
-    shape[MOUTH_FROWN_L]  = min(1.0, shape[MOUTH_FROWN_L] + 0.02 * amp * max(0.0, -drift))
-    shape[MOUTH_FROWN_R]  = min(1.0, shape[MOUTH_FROWN_R] + 0.02 * amp * max(0.0,  drift))
+    # Stronger lateral / cheeks for more life
+    lateral = max(0.0, 1.0 - abs(drift))
+    shape[MOUTH_LEFT]     = 0.12 * amp * lateral
+    shape[MOUTH_RIGHT]    = 0.12 * amp * lateral
+    shape[MOUTH_DIMPLE_L] = min(1.0, shape[MOUTH_DIMPLE_L] + 0.06 * amp)
+    shape[MOUTH_DIMPLE_R] = min(1.0, shape[MOUTH_DIMPLE_R] + 0.06 * amp)
+    shape[MOUTH_FROWN_L]  = min(1.0, shape[MOUTH_FROWN_L] + 0.035 * amp * max(0.0, -drift))
+    shape[MOUTH_FROWN_R]  = min(1.0, shape[MOUTH_FROWN_R] + 0.035 * amp * max(0.0,  drift))
 
 def _smooth(prev: List[float], cur: List[float], alpha: float) -> List[float]:
+    # alpha weights previous (higher alpha = slower)
     return [alpha*p + (1-alpha)*c for p,c in zip(prev,cur)]
 
 def _sequence_classes(text: str, frames: int) -> List[str]:
@@ -247,7 +295,7 @@ def _sequence_classes(text: str, frames: int) -> List[str]:
     span = max(1, len(classes)//frames)
     return [classes[min(i*span, len(classes)-1)] for i in range(frames)]
 
-# ---------- NEW: gains parsing & application ----------
+# ---------- gains parsing & application ----------
 
 def _parse_shape_gains(s: str) -> List[float]:
     """
@@ -307,11 +355,12 @@ def _autoscale_frames(frames: List[List[float]], target_peak: float = VIS_TARGET
 
 def _convai_frames(text: str, duration_ms: int, audio_bytes: Optional[bytes]) -> List[List[float]]:
     """
-    Main viseme generator:
-      1) envelope & phonetic class sequence
-      2) shape per frame + smoothing + asymmetry
-      3) NEW: per-column gains
-      4) final autoscale toward VIS_TARGET_PEAK
+    Main viseme generator (ARKit-15):
+      1) envelope & phonetic class sequence (with envelope smoothing)
+      2) shape per frame + inertia smoothing + asymmetry
+      3) micro-jitter for life-like motion
+      4) per-column gains
+      5) final autoscale toward VIS_TARGET_PEAK
     """
     if duration_ms <= 0:
         duration_ms = 300
@@ -322,18 +371,41 @@ def _convai_frames(text: str, duration_ms: int, audio_bytes: Optional[bytes]) ->
 
     out: List[List[float]] = []
     prev = [0.0]*ARKIT_DIM
+
+    # precompute drift phase per frame (smooth sine)
+    # drift in [-1,1], scaled later by VIS_DRIFT_AMPL
+    drift_wave = [math.sin(2.0*math.pi * (i / max(1.0, float(VIS_DRIFT_PERIOD)))) for i in range(frames)]
+
     for i in range(frames):
         amp = max(VIS_MIN_FLOOR, min(1.0, env[i]))
         cur = _shape_for_class(seq[i], amp)
-        drift = ((i % 7)-3)/10.0
+
+        # Natural asymmetry + cheeks (scaled by drift amplitude)
+        drift = drift_wave[i] * VIS_DRIFT_AMPL
         _spread_lr(cur, amp, drift)
-        alpha = VIS_ATTACK_ALPHA if i==0 or amp >= prev[JAW_OPEN] else VIS_RELEASE_ALPHA
+
+        # Primary inertia smoothing (attack vs release)
+        alpha = VIS_ATTACK_ALPHA if (i == 0 or amp >= prev[JAW_OPEN]) else VIS_RELEASE_ALPHA
         cur = _smooth(prev, cur, alpha)
+
+        # Extra global low-pass for slower, creamier motion
+        if VIS_EXTRA_SMOOTH > 1e-3:
+            cur = _smooth(cur, prev, VIS_EXTRA_SMOOTH)  # tiny pull toward previous
+
+        # Subtle, low-freq micro-jitter on smiles/dimples to avoid rigidity
+        if VIS_MICRO_JITTER > 0.0:
+            jitter = VIS_MICRO_JITTER * _lf_sine(i, VIS_FPS, VIS_MICRO_FREQ, phase=0.5)
+            cur[MOUTH_SMILE_L] = min(1.0, max(0.0, cur[MOUTH_SMILE_L] + jitter))
+            cur[MOUTH_SMILE_R] = min(1.0, max(0.0, cur[MOUTH_SMILE_R] - jitter))
+            cur[MOUTH_DIMPLE_L] = min(1.0, max(0.0, cur[MOUTH_DIMPLE_L] + 0.6*jitter))
+            cur[MOUTH_DIMPLE_R] = min(1.0, max(0.0, cur[MOUTH_DIMPLE_R] - 0.6*jitter))
+
+        # Clamp + quantization for stability
         cur = [min(1.0, max(0.0, round(v, 3))) for v in cur]
         out.append(cur)
         prev = cur
 
-    # NEW: apply user-configurable column gains
+    # Apply user-configurable column gains
     per_shape = _parse_shape_gains(VIS_SHAPE_GAINS)
     out = _apply_column_gains(out, VIS_COLUMN_GAIN, per_shape)
 
@@ -506,8 +578,9 @@ async def synthesize_tts_async(text: str, service: str | None, voice_id: str | N
     try:
         peak = max((max(frame) for frame in visemes), default=0.0)
         log.info(
-            "[Viseme] frames=%d ms_per_frame=%d peak=%.3f tgt=%.2f gain=%.2f",
-            len(visemes), MS_PER_FRAME, peak, VIS_TARGET_PEAK, VIS_COLUMN_GAIN
+            "[Viseme] frames=%d ms_per_frame=%d peak=%.3f tgt=%.2f gain=%.2f win=%d drift=%s jit=%.3f",
+            len(visemes), MS_PER_FRAME, peak, VIS_TARGET_PEAK, VIS_COLUMN_GAIN,
+            VIS_ENV_SMOOTH_WIN, f"{VIS_DRIFT_PERIOD}/{VIS_DRIFT_AMPL}", VIS_MICRO_JITTER
         )
     except Exception:
         pass

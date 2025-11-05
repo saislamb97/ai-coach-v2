@@ -6,7 +6,10 @@ import os
 import re
 import time
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
+
+import difflib
+from copy import deepcopy
 
 import wikipedia
 from asgiref.sync import sync_to_async
@@ -116,22 +119,208 @@ def _ensure_single_top_header(blocks: List[Dict[str, Any]], title: Optional[str]
         out = [{"type": "header", "data": {"text": title, "level": 2}}] + out
     return out
 
-def _headers(ej: Dict[str, Any]) -> List[str]:
-    out = []
-    for b in (ej or {}).get("blocks", []):
-        if (b.get("type") or "").lower() == "header":
-            t = (b.get("data", {}).get("text") or "").strip()
-            if t:
-                out.append(t)
-    return out
+# --------------------------------------------------------------------------------------
+# FULL DIFF (fields + Editor.js)
+# --------------------------------------------------------------------------------------
+def _canon_str(x: Any) -> str:
+    return " ".join(str(x or "").split())
 
-def _diff_simple_headers(cur_ej: Dict[str, Any], prev_ej: Dict[str, Any]) -> Dict[str, List[str]]:
-    cur = _headers(cur_ej or {})
-    prev = _headers(prev_ej or {})
+def _canon_items(items: Any) -> List[str]:
+    if not isinstance(items, list):
+        return []
+    return [_canon_str(v) for v in items if _canon_str(v)]
+
+def _canon_block(b: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a canonical minimal representation of a block for stable comparison."""
+    t = (b.get("type") or "").lower()
+    d = b.get("data") or {}
+    if t == "header":
+        return {"type": "header", "level": int(d.get("level", 2)), "text": _canon_str(d.get("text"))}
+    if t == "paragraph":
+        return {"type": "paragraph", "text": _canon_str(d.get("text"))}
+    if t == "list":
+        return {"type": "list", "style": (d.get("style") or "unordered"), "items": _canon_items(d.get("items"))}
+    # Unknown types should have been filtered, but keep a fallback:
+    return {"type": t, "data": d}
+
+def _block_signature(cb: Dict[str, Any]) -> str:
+    """Compact signature used for sequence matching and move detection."""
+    t = cb.get("type")
+    if t == "header":
+        return f"header|{cb.get('level',2)}|{cb.get('text','')}"
+    if t == "paragraph":
+        return f"paragraph|{cb.get('text','')}"
+    if t == "list":
+        joined = "•".join(cb.get("items", []))
+        return f"list|{cb.get('style','unordered')}|{joined}"
+    return f"{t}|{json.dumps(cb, sort_keys=True)}"
+
+def _diff_text(prev: str, cur: str) -> Dict[str, Any]:
     return {
-        "added": [h for h in cur if h not in prev],
-        "removed": [h for h in prev if h not in cur],
-        "unchanged": [h for h in cur if h in prev],
+        "changed": prev != cur,
+        "from": prev,
+        "to": cur,
+    }
+
+def _diff_list(prev_items: List[str], cur_items: List[str]) -> Dict[str, Any]:
+    prev_set, cur_set = set(prev_items), set(cur_items)
+    added = [x for x in cur_items if x not in prev_set]
+    removed = [x for x in prev_items if x not in cur_set]
+    kept = [x for x in cur_items if x in prev_set]
+    reordered = (kept != [x for x in prev_items if x in cur_set])
+    return {
+        "changed": bool(added or removed or reordered),
+        "added": added,
+        "removed": removed,
+        "kept": kept,
+        "reordered": reordered
+    }
+
+def _compare_blocks(pb: Dict[str, Any], cb: Dict[str, Any]) -> Dict[str, Any]:
+    """Return granular changes for a single block (same type)."""
+    pt, ct = pb.get("type"), cb.get("type")
+    if pt != ct:
+        return {"type_changed": True, "from": pb, "to": cb}
+
+    t = pt
+    changes: Dict[str, Any] = {"type": t, "changed": False}
+
+    if t == "header":
+        level_diff = int(pb.get("level", 2)) != int(cb.get("level", 2))
+        text_diff = _diff_text(pb.get("text",""), cb.get("text",""))
+        changes.update({
+            "level_changed": level_diff,
+            "text": text_diff,
+        })
+        changes["changed"] = level_diff or text_diff["changed"]
+
+    elif t == "paragraph":
+        text_diff = _diff_text(pb.get("text",""), cb.get("text",""))
+        changes.update({"text": text_diff})
+        changes["changed"] = text_diff["changed"]
+
+    elif t == "list":
+        style_diff = (pb.get("style","unordered") != cb.get("style","unordered"))
+        items_diff = _diff_list(cast(List[str], pb.get("items", [])), cast(List[str], cb.get("items", [])))
+        changes.update({
+            "style_changed": style_diff,
+            "items": items_diff,
+        })
+        changes["changed"] = style_diff or items_diff["changed"]
+
+    else:
+        raw_changed = (pb != cb)
+        changes.update({"raw_changed": raw_changed, "from": pb, "to": cb})
+        changes["changed"] = raw_changed
+
+    return changes
+
+def _diff_editorjs(prev_ej: Dict[str, Any], cur_ej: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute a complete per-block diff. Detect add/remove/update/move with details."""
+    prev_blocks = (prev_ej or {}).get("blocks") or []
+    cur_blocks = (cur_ej or {}).get("blocks") or []
+
+    # Canonical
+    P = [_canon_block(b) for b in prev_blocks]
+    C = [_canon_block(b) for b in cur_blocks]
+    Psig = [_block_signature(b) for b in P]
+    Csig = [_block_signature(b) for b in C]
+
+    sm = difflib.SequenceMatcher(a=Psig, b=Csig, autojunk=False)
+    opcodes = sm.get_opcodes()
+
+    ops: List[Dict[str, Any]] = []
+    pending_deletes: List[Tuple[int, str, Dict[str, Any]]] = []  # (idx, sig, block)
+    pending_inserts: List[Tuple[int, str, Dict[str, Any]]] = []  # (idx, sig, block)
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for k in range(i1, i2):
+                ops.append({"op": "keep", "index": j1 + (k - i1), "type": C[j1 + (k - i1)]["type"]})
+        elif tag == "delete":
+            for k in range(i1, i2):
+                pending_deletes.append((k, Psig[k], P[k]))
+        elif tag == "insert":
+            for k in range(j1, j2):
+                pending_inserts.append((k, Csig[k], C[k]))
+        elif tag == "replace":
+            plen, clen = i2 - i1, j2 - j1
+            n = min(plen, clen)
+            for t in range(n):
+                pb, cb = P[i1 + t], C[j1 + t]
+                change = _compare_blocks(pb, cb)
+                if change.get("changed"):
+                    ops.append({
+                        "op": "update",
+                        "index": j1 + t,
+                        "type": cb.get("type"),
+                        "changes": change
+                    })
+                else:
+                    ops.append({"op": "keep", "index": j1 + t, "type": cb.get("type")})
+            for k in range(i1 + n, i2):
+                pending_deletes.append((k, Psig[k], P[k]))
+            for k in range(j1 + n, j2):
+                pending_inserts.append((k, Csig[k], C[k]))
+
+    # Convert matching delete+insert of same signature into moves
+    used_ins: set[int] = set()
+    used_del: set[int] = set()
+    for di, ds, db in pending_deletes:
+        match_j = next((ji for (ji, js, _) in pending_inserts if js == ds and ji not in used_ins), None)
+        if match_j is not None:
+            used_del.add(di)
+            used_ins.add(match_j)
+            ops.append({"op": "move", "from": di, "to": match_j, "type": db.get("type"), "block": db})
+    # remaining deletes → remove
+    for di, ds, db in pending_deletes:
+        if di in used_del:
+            continue
+        ops.append({"op": "remove", "index": di, "type": db.get("type"), "block": db})
+    # remaining inserts → add
+    for ji, js, jb in pending_inserts:
+        if ji in used_ins:
+            continue
+        ops.append({"op": "add", "index": ji, "type": jb.get("type"), "block": jb})
+
+    # header-only summary (for convenience)
+    prev_headers = [b.get("text","") for b in P if b.get("type") == "header"]
+    cur_headers  = [b.get("text","") for b in C if b.get("type") == "header"]
+    headers = {
+        "added":   [h for h in cur_headers if h not in prev_headers],
+        "removed": [h for h in prev_headers if h not in cur_headers],
+        "unchanged": [h for h in cur_headers if h in prev_headers],
+        "renamed": [
+            {"index": i, "from": prev_headers[i], "to": cur_headers[i]}
+            for i in range(min(len(prev_headers), len(cur_headers)))
+            if prev_headers[i] != cur_headers[i]
+        ]
+    }
+
+    changed = any(op["op"] in ("add","remove","update","move") for op in ops)
+    return {
+        "changed": changed,
+        "block_count": {"from": len(P), "to": len(C)},
+        "ops": ops,  # exhaustive
+        "headers": headers,
+    }
+
+def compute_full_diff(*, cur_title: str, cur_summary: str, cur_ej: Dict[str, Any],
+                      prev_title: str, prev_summary: str, prev_ej: Dict[str, Any]) -> Dict[str, Any]:
+    title = _diff_text(_canon_str(prev_title), _canon_str(cur_title))
+    summary = _diff_text(_canon_str(prev_summary), _canon_str(cur_summary))
+    ej = _diff_editorjs(prev_ej or {}, cur_ej or {})
+
+    fields_changed = []
+    if title["changed"]: fields_changed.append("title")
+    if summary["changed"]: fields_changed.append("summary")
+    if ej["changed"]: fields_changed.append("editorjs")
+
+    return {
+        "fields_changed": fields_changed,
+        "title": title,
+        "summary": summary,
+        "editorjs": ej,
     }
 
 # --------------------------------------------------------------------------------------
@@ -218,6 +407,16 @@ def _db_fetch_latest_slides_snapshot(session_id: int) -> Optional[Dict[str, Any]
     if not s:
         return None
     s.refresh_from_db(using=DB_PRIMARY)
+
+    diff = compute_full_diff(
+        cur_title=s.title or "",
+        cur_summary=s.summary or "",
+        cur_ej=s.editorjs or {},
+        prev_title=s.previous_title or "",
+        prev_summary=s.previous_summary or "",
+        prev_ej=s.previous_editorjs or {},
+    )
+
     return {
         "title": s.title,
         "summary": s.summary,
@@ -231,7 +430,7 @@ def _db_fetch_latest_slides_snapshot(session_id: int) -> Optional[Dict[str, Any]
         "thread_id": s.session.thread_id,
         "updated_by": s.updated_by,
         "updated_at": s.updated_at.isoformat(),
-        "diff_headers": _diff_simple_headers(s.editorjs or {}, s.previous_editorjs or {}),
+        "diff": diff,  # ← exhaustive diff (replaces diff_headers)
     }
 
 @sync_to_async
@@ -281,6 +480,16 @@ def _db_rotate_and_save_slides(session_id: int, payload: Dict[str, Any], updated
         .first()
     )
     fresh.refresh_from_db(using=DB_PRIMARY)
+
+    diff = compute_full_diff(
+        cur_title=fresh.title or "",
+        cur_summary=fresh.summary or "",
+        cur_ej=fresh.editorjs or {},
+        prev_title=fresh.previous_title or "",
+        prev_summary=fresh.previous_summary or "",
+        prev_ej=fresh.previous_editorjs or {},
+    )
+
     return {
         "title": fresh.title,
         "summary": fresh.summary,
@@ -294,7 +503,7 @@ def _db_rotate_and_save_slides(session_id: int, payload: Dict[str, Any], updated
         "thread_id": fresh.session.thread_id,
         "updated_by": fresh.updated_by,
         "updated_at": fresh.updated_at.isoformat(),
-        "diff_headers": _diff_simple_headers(fresh.editorjs or {}, fresh.previous_editorjs or {}),
+        "diff": diff,  # ← exhaustive diff (replaces diff_headers)
     }
 
 # --------------------------------------------------------------------------------------

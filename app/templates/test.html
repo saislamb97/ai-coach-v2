@@ -269,6 +269,33 @@
   let ws = null;
   let audioMuted = false;
 
+  // emotion-first gating (buffer tokens until we see emotion or timeout)
+  let expectingEmotion = false;
+  let tokenBuffer = '';
+  let emotionFlushTimer = null;
+  const EMOTION_GUARD_MS = 600; // small safety net in case of network reordering
+
+  function beginEmotionGuard() {
+    expectingEmotion = true;
+    tokenBuffer = '';
+    try { clearTimeout(emotionFlushTimer); } catch {}
+    emotionFlushTimer = setTimeout(() => flushTokenBuffer(), EMOTION_GUARD_MS);
+    // show “waiting” state
+    setEmotionBadge('…', 1);
+  }
+  function onEmotionArrived() {
+    expectingEmotion = false;
+    try { clearTimeout(emotionFlushTimer); } catch {}
+    emotionFlushTimer = null;
+    flushTokenBuffer();
+  }
+  function flushTokenBuffer() {
+    if (!tokenBuffer) return;
+    $('#textTokens').textContent += tokenBuffer;
+    $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
+    tokenBuffer = '';
+  }
+
   function setBadge(connected){
     const el = $('#wsStatus');
     el.innerHTML = `<span class="h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-500'} inline-block"></span> ${connected ? 'connected' : 'disconnected'}`;
@@ -832,6 +859,8 @@
       $('#pttButton').disabled = true;
       logLine($('#evtLog'), `[${now()}] close code=${ev.code}`);
       clearAudioQueue();
+      // clear emotion guard
+      expectingEmotion = false; tokenBuffer = ''; try { clearTimeout(emotionFlushTimer); } catch {}
     };
     ws.onerror = (ev) => logLine($('#evtLog'), `[${now()}] error ${ev?.message || ''}`);
 
@@ -846,6 +875,7 @@
 
         case 'response_start':
           logLine($('#evtLog'), `[${now()}] response_start`);
+          beginEmotionGuard(); // wait for emotion before rendering text
           break;
 
         case 'audio_muted':
@@ -861,14 +891,19 @@
 
         case 'text_token': {
           const tok = (msg.token || '').toString();
-          $('#textTokens').textContent += tok;
-          $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
+          if (expectingEmotion) {
+            tokenBuffer += tok;
+          } else {
+            $('#textTokens').textContent += tok;
+            $('#textTokens').scrollTop = $('#textTokens').scrollHeight;
+          }
           break;
         }
 
         case 'emotion': {
           const e = msg.emotion || {};
           setEmotionBadge(e.name, e.intensity);
+          onEmotionArrived(); // flush buffered tokens
           logLine($('#evtLog'), `[${now()}] emotion ${JSON.stringify(e)}`);
           if (DEBUG) { console.log('[emotion/raw]', msg); }
           window.__lastEmotion = msg;
@@ -890,8 +925,6 @@
         case 'audio_response': {
           const b64 = msg.audio || '';
           const frames = Array.isArray(msg.viseme) ? msg.viseme : [];
-          if (DEBUG) console.log('frames:', frames);
-          if (DEBUG) console.log('frames(len):', frames.length);
           const fmt = (msg.viseme_format || 'arkit15').toLowerCase();
 
           // Prefer explicit timing (seconds). Else synthesize from fps or frame_ms.
@@ -926,10 +959,12 @@
         }
 
         case 'response_done':
+          flushTokenBuffer(); // in case we timed out on emotion
           logLine($('#evtLog'), `[${now()}] response_done timings=${JSON.stringify(msg.timings || {})}`);
           break;
 
         case 'response_ended':
+          flushTokenBuffer();
           logLine($('#evtLog'), `[${now()}] response_ended`);
           break;
 
