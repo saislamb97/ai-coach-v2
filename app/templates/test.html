@@ -207,14 +207,14 @@
     }
   }
   </script>
-
-  <!-- APP SCRIPT (ESM) -->
-  <script type="module">
+<script type="module">
   import * as THREE from 'three';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-  // ---------- helpers ----------
+  // ---------- config / helpers ----------
+  const DEBUG = true;
+
   const $ = (s) => document.querySelector(s);
   const now = () => new Date().toLocaleTimeString();
   const logLine = (el, line) => { el.textContent += (el.textContent ? "\n" : "") + line; el.scrollTop = el.scrollHeight; };
@@ -248,6 +248,7 @@
     for (let i=0;i<bin.length;i++) buf[i] = bin.charCodeAt(i);
     return new Blob([buf], { type: outMime });
   }
+  const safeRevoke = (url) => { try { if (url) URL.revokeObjectURL(url); } catch {} };
 
   // Emotion badge
   function setEmotionBadge(name, intensity) {
@@ -284,7 +285,6 @@
     el.classList.toggle('bg-emerald-100', !audioMuted);
     $('#btnToggleMute').textContent = audioMuted ? 'Unmute' : 'Mute';
   }
-
   function buildWsUrl() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const bot = encodeURIComponent($('#botId').value.trim());
@@ -296,13 +296,14 @@
   function setAuthCookie(){
     const key = $('#apiKey').value.trim();
     if (!key) return;
-    document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax`;
+    const secure = location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `api_key=${encodeURIComponent(key)}; path=/; SameSite=Lax${secure}`;
   }
 
   // ---------- Three.js scene ----------
   let scene, camera, renderer, controls, avatarRoot = null;
-  let visemeTargets = []; // { mesh, dict, influences, ovr: map idx->morphIndex }
-  let arkitTargets = [];  // { mesh, dict, influences, a: {jawOpen,…} }
+  let visemeTargets = []; // { mesh, dict, dictLc, influences, ovr: map idx->morphIndex }
+  let arkitTargets = [];  // { mesh, dict, dictLc, influences, a: {jawOpen,…} }
   const threeRoot = $('#threeRoot');
 
   function initThree() {
@@ -336,14 +337,12 @@
     window.addEventListener('resize', onResize);
     tick();
   }
-
   function onResize() {
     if (!renderer || !camera) return;
     const w = threeRoot.clientWidth, h = threeRoot.clientHeight;
     camera.aspect = w/h; camera.updateProjectionMatrix();
     renderer.setSize(w, h);
   }
-
   function tick(){
     requestAnimationFrame(tick);
     controls?.update();
@@ -390,23 +389,23 @@
     });
   }
 
-  // OVR names with a few common case variants
+  // OVR names with common variants (we'll match case-insensitively)
   const OVR_SYNONYMS = {
     0:  ['viseme_sil'],
-    1:  ['viseme_PP'],
-    2:  ['viseme_FF'],
-    3:  ['viseme_TH'],
-    4:  ['viseme_DD'],
-    5:  ['viseme_kk','viseme_KK'],
-    6:  ['viseme_CH'],
-    7:  ['viseme_SS'],
-    8:  ['viseme_nn','viseme_NN'],
-    9:  ['viseme_RR'],
-    10: ['viseme_aa','viseme_AA'],
-    11: ['viseme_E'],
-    12: ['viseme_I'],
-    13: ['viseme_O'],
-    14: ['viseme_U'],
+    1:  ['viseme_pp'],
+    2:  ['viseme_ff'],
+    3:  ['viseme_th'],
+    4:  ['viseme_dd'],
+    5:  ['viseme_kk'],
+    6:  ['viseme_ch'],
+    7:  ['viseme_ss'],
+    8:  ['viseme_nn'],
+    9:  ['viseme_rr'],
+    10: ['viseme_aa'],
+    11: ['viseme_e'],
+    12: ['viseme_i'],
+    13: ['viseme_o'],
+    14: ['viseme_u'],
   };
 
   // ARKit primary + common RPM synonyms
@@ -439,30 +438,33 @@
       if (!obj.isMesh || !obj.morphTargetDictionary || !obj.morphTargetInfluences) return;
 
       const dict = obj.morphTargetDictionary;
+      const dictLc = {};
+      for (const [k,v] of Object.entries(dict)) dictLc[String(k).toLowerCase()] = v;
 
-      // OVR visemes
+      // OVR visemes (case-insensitive)
       const ovr = {};
       let hasOVR = false;
       for (let i=0;i<15;i++){
-        const names = OVR_SYNONYMS[i] || [];
+        const names = (OVR_SYNONYMS[i] || []).map(s=>s.toLowerCase());
         for (const n of names) {
-          if (dict[n] != null) { ovr[i] = dict[n]; hasOVR = true; break; }
+          if (dictLc[n] != null) { ovr[i] = dictLc[n]; hasOVR = true; break; }
         }
       }
       if (hasOVR) {
-        visemeTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, ovr });
+        visemeTargets.push({ mesh: obj, dict, dictLc, influences: obj.morphTargetInfluences, ovr });
       }
 
-      // ARKit (with synonyms)
+      // ARKit (with synonyms, case-insensitive)
       const a = {};
       let hasARK = false;
       for (const key of ARKIT_CANON) {
         for (const name of ARKIT_SYNONYMS[key]) {
-          if (dict[name] != null) { a[key] = dict[name]; hasARK = true; break; }
+          const idx = dictLc[name.toLowerCase()];
+          if (idx != null) { a[key] = idx; hasARK = true; break; }
         }
       }
       if (hasARK) {
-        arkitTargets.push({ mesh: obj, dict, influences: obj.morphTargetInfluences, a });
+        arkitTargets.push({ mesh: obj, dict, dictLc, influences: obj.morphTargetInfluences, a });
       }
     });
   }
@@ -470,12 +472,12 @@
   function reportBlendshapes() {
     const namesFound = new Set();
     for (const t of visemeTargets) {
-      for (const [name] of Object.entries(t.dict)) if (name.startsWith('viseme_')) namesFound.add(name);
+      for (const [name] of Object.entries(t.dict)) if (String(name).toLowerCase().startsWith('viseme_')) namesFound.add(name);
     }
     const aFound = new Set();
     for (const t of arkitTargets) {
       for (const [k, arr] of Object.entries(ARKIT_SYNONYMS)) {
-        for (const n of arr) if (t.dict[n] != null) aFound.add(n);
+        for (const n of arr) if (t.dictLc[n.toLowerCase()] != null) aFound.add(n);
       }
     }
     logLine($('#evtLog'), `[${now()}] OVR morphs: ${namesFound.size ? Array.from(namesFound).sort().join(', ') : 'none'}`);
@@ -529,18 +531,16 @@
   function resetMorphs() {
     const zero = new Array(15).fill(0);
     prevFrame = zero.slice();
-    // ARKit
+    // ARKit via synonym-resolved indices
     for (const t of arkitTargets) {
       const d = t.a, inf = t.influences;
-      if (d.jawOpen      != null) inf[d.jawOpen]      = 0;
-      if (d.mouthFunnel  != null) inf[d.mouthFunnel]  = 0;
-      if (d.mouthClose   != null) inf[d.mouthClose]   = 0;
-      if (d.mouthPucker  != null) inf[d.mouthPucker]  = 0;
-      const more = ["mouthSmileLeft","mouthSmileRight","mouthFrownLeft","mouthFrownRight","mouthDimpleLeft","mouthDimpleRight","mouthStretchLeft","mouthStretchRight","tongueOut"];
-      for (const name of more) {
-        const k = t.dict[name];
-        if (k != null) t.influences[k] = 0;
-      }
+      const fields = [
+        'jawOpen','mouthFunnel','mouthClose','mouthPucker',
+        'mouthSmileLeft','mouthSmileRight','mouthFrownLeft','mouthFrownRight',
+        'mouthDimpleLeft','mouthDimpleRight','mouthStretchLeft','mouthStretchRight',
+        'tongueOut'
+      ];
+      for (const key of fields) { const k = d[key]; if (k != null) inf[k] = 0; }
     }
     // OVR
     for (const t of visemeTargets) {
@@ -579,8 +579,8 @@
           ["mouthDimpleLeft",10],["mouthDimpleRight",11],["mouthStretchLeft",12],["mouthStretchRight",13],
           ["tongueOut",14],
         ];
-        for (const [name, idx] of more) {
-          const k = t.dict[name];
+        for (const [canon, idx] of more) {
+          const k = d[canon];
           if (k != null) inf[k] = out[idx];
         }
       }
@@ -654,19 +654,15 @@
         visemeRAF = requestAnimationFrame(step);
         return;
       }
-
       const t = audioEl.currentTime;
 
       if (activeTimes && activeTimes.length === activeFrames.length) {
-        // time-based with interpolation
         const times = activeTimes;
-        // clamp
         if (t <= times[0]) {
           applyVisemeFrame(activeFrames[0], activeFmt);
         } else if (t >= times[times.length - 1]) {
           applyVisemeFrame(activeFrames[activeFrames.length - 1], activeFmt);
         } else {
-          // advance pointer
           while (lastIdx < times.length - 2 && t >= times[lastIdx + 1]) lastIdx++;
           const t0 = times[lastIdx];
           const t1 = times[lastIdx + 1];
@@ -676,7 +672,6 @@
           applyVisemeFrame(lerpFrame(f0, f1, alpha), activeFmt);
         }
       } else {
-        // fallback: map by fraction
         const frac = Math.min(0.9999, Math.max(0, t / audioEl.duration));
         const idx = Math.floor(frac * activeFrames.length);
         applyVisemeFrame(activeFrames[idx] || activeFrames[activeFrames.length-1], activeFmt);
@@ -693,11 +688,12 @@
 
   function clearAudioQueue() {
     try { audioEl.pause(); } catch {}
+    if (activeUrl) safeRevoke(activeUrl);
     audioEl.removeAttribute('src');
     audioEl.load();
     while (audioQ.length) {
       const item = audioQ.shift();
-      if (item?.url) { try { URL.revokeObjectURL(item.url); } catch {} }
+      if (item?.url) safeRevoke(item.url);
     }
     playing = false;
     activeFrames = [];
@@ -717,15 +713,14 @@
       // framesSpec can be array (frames) OR {frames, times?, fps?}
       let frames = [];
       let times = null;
+      let fps = 0;
       if (Array.isArray(framesSpec)) {
         frames = framesSpec;
       } else if (framesSpec && typeof framesSpec === 'object') {
         frames = Array.isArray(framesSpec.frames) ? framesSpec.frames : [];
         if (Array.isArray(framesSpec.times)) times = framesSpec.times.map(Number);
-        const fps = Number(framesSpec.fps || framesSpec.viseme_fps || 0);
-        if (!times && fps > 0 && frames.length) {
-          times = frames.map((_, i) => i / fps);
-        }
+        fps = Number(framesSpec.fps || framesSpec.viseme_fps || 0);
+        if (!times && fps > 0 && frames.length) times = frames.map((_, i) => i / fps);
       }
 
       audioQ.push({ url, frames, times, fmt });
@@ -740,6 +735,9 @@
     if (playing || !audioQ.length) return;
     playing = true;
 
+    // free previous URL early (we also free on ended/error; this helps mid-queue)
+    if (activeUrl) safeRevoke(activeUrl);
+
     const item = audioQ.shift();
     activeFrames = item.frames || [];
     activeTimes = Array.isArray(item.times) ? item.times : null;
@@ -752,7 +750,6 @@
       if (!isZero(activeFrames[0])) activeFrames = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], ...activeFrames];
       if (!isZero(activeFrames[activeFrames.length-1])) activeFrames = [...activeFrames, [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]];
       if (activeTimes && activeTimes.length === (activeFrames.length - 2)) {
-        // If we padded frames but not times, extend times a hair at both ends
         const head = Math.max(0, activeTimes[0] - 0.02);
         const tail = activeTimes[activeTimes.length - 1] + 0.02;
         activeTimes = [head, ...activeTimes, tail];
@@ -762,7 +759,6 @@
     audioEl.src = item.url;
     audioEl.onloadedmetadata = () => {
       if (!activeTimes && activeFrames.length && isFinite(audioEl.duration) && audioEl.duration > 0) {
-        // last-resort: spread frames across actual audio duration
         const dur = audioEl.duration;
         activeTimes = activeFrames.map((_, i) => (i / Math.max(1, activeFrames.length - 1)) * dur);
       }
@@ -771,8 +767,8 @@
         : (activeFrames.length / Math.max(0.001, audioEl.duration));
       logLine($('#audioLog'), `[${now()}] ▶ playing dur=${audioEl.duration.toFixed(2)}s ~${effFps.toFixed(1)} fps fmt=${activeFmt}`);
     };
-    audioEl.onended = audioEl.onerror = () => {
-      try { if (activeUrl) URL.revokeObjectURL(activeUrl); } catch {}
+    const onFinish = () => {
+      safeRevoke(activeUrl);
       playing = false;
       activeFrames = [];
       activeTimes = null;
@@ -780,13 +776,14 @@
       resetMorphs();
       playNext();
     };
+    audioEl.onended = onFinish;
+    audioEl.onerror = onFinish;
     audioEl.onplay = () => startVisemeLoop();
     audioEl.onpause = () => stopVisemeLoop();
 
     audioEl.play().catch(err => {
       logLine($('#audioLog'), `[${now()}] ! playback error: ${err}`);
-      playing = false;
-      resetMorphs();
+      onFinish();
     });
   }
 
@@ -822,7 +819,7 @@
       $('#btnToggleMute').disabled = false;
       $('#btnStopAudio').disabled = false;
       $('#pttButton').disabled = false;
-      updateMicPermBadge(); // reflect current permission right away
+      updateMicPermBadge();
       logLine($('#evtLog'), `[${now()}] open ${url}`);
     };
     ws.onclose = (ev) => {
@@ -853,6 +850,7 @@
 
         case 'audio_muted':
           setAudioBadge(!!msg.muted);
+          audioEl.muted = !!msg.muted;         // keep local player in sync
           logLine($('#evtLog'), `[${now()}] audio_muted=${!!msg.muted}`);
           break;
 
@@ -872,7 +870,7 @@
           const e = msg.emotion || {};
           setEmotionBadge(e.name, e.intensity);
           logLine($('#evtLog'), `[${now()}] emotion ${JSON.stringify(e)}`);
-          console.log('[emotion/raw]', msg);
+          if (DEBUG) { console.log('[emotion/raw]', msg); }
           window.__lastEmotion = msg;
           break;
         }
@@ -892,28 +890,35 @@
         case 'audio_response': {
           const b64 = msg.audio || '';
           const frames = Array.isArray(msg.viseme) ? msg.viseme : [];
-          console.log('frames:', frames);
+          if (DEBUG) console.log('frames:', frames);
+          if (DEBUG) console.log('frames(len):', frames.length);
           const fmt = (msg.viseme_format || 'arkit15').toLowerCase();
 
-          // Prefer explicit timing (seconds). Else synthesize from fps.
-          const times = Array.isArray(msg.viseme_times) ? msg.viseme_times.map(Number) : null;
+          // Prefer explicit timing (seconds). Else synthesize from fps or frame_ms.
+          let times = Array.isArray(msg.viseme_times) ? msg.viseme_times.map(Number) : null;
           const fps = Number(msg.viseme_fps || 0);
+          const frameMs = Number(msg.viseme_frame_ms || msg.frame_ms || 0);
+          if (!times && !fps && frameMs > 0 && frames.length) {
+            const step = frameMs / 1000;
+            times = Array.from({length: frames.length}, (_, i) => i * step);
+          }
 
-          const framesSpec = times ? { frames, times }
-                          : (fps > 0 ? { frames, fps } : frames);
+          let framesSpec = times ? { frames, times }
+                                : (fps > 0 ? { frames, fps } : frames);
 
           const preview = typeof b64 === 'string'
             ? (b64.startsWith('data:') ? b64.split(',')[1] || '' : b64)
             : '';
           const head = preview.slice(0, 96);
 
-          console.groupCollapsed('[audio_response/raw]');
-          console.log('format:', fmt);
-          console.log('frames(len):', frames.length);
-          if (times) console.log('times[0..3]:', times.slice(0,4));
-          if (fps) console.log('fps:', fps);
-          console.log('audio head:', head);
-          console.groupEnd();
+          if (DEBUG) {
+            console.groupCollapsed('[audio_response/raw]');
+            console.log('format:', fmt);
+            if (times) console.log('times[0..3]:', times.slice(0,4));
+            if (fps) console.log('fps:', fps);
+            console.log('audio head:', head);
+            console.groupEnd();
+          }
           window.__lastViseme = { fmt, framesLen: frames.length, times, fps, head };
 
           queueAudio(b64, framesSpec, fmt, `head=${head}…`);
@@ -952,6 +957,8 @@
     e.preventDefault();
     if (!ws || ws.readyState !== 1) return;
     const nextMuted = !audioMuted;
+    audioEl.muted = nextMuted;          // local immediate effect
+    setAudioBadge(nextMuted);           // reflect instantly
     ws.send(JSON.stringify({ type: nextMuted ? 'mute_audio' : 'unmute_audio' }));
   };
   $('#btnStopAudio').onclick = (e) => {
@@ -991,7 +998,7 @@
       'audio/ogg'
     ];
     for (const m of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
+      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) {
         return m;
       }
     }
@@ -1002,7 +1009,7 @@
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       return stream;
-    } catch (e) {
+    } catch {
       return null;
     }
   }
@@ -1109,7 +1116,7 @@
   // boot
   initThree();
   updateMicPermBadge();
-</script>
+  </script>
 
 </body>
 </html>

@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import json
 import logging
 from io import BytesIO
 from time import perf_counter
@@ -40,7 +41,7 @@ TARGET_DBFS = float(os.getenv("TARGET_DBFS", "-1.0"))
 # =============================================================================
 VIS_FPS = int(os.getenv("VIS_FPS", "60"))
 MS_PER_FRAME = max(10, int(round(1000.0 / max(1, VIS_FPS))))
-ARKIT_DIM = 15
+ARKIT_DIM = 15  # ARKit-15 compact order used throughout
 
 # Amplitude shaping / smoothing
 VIS_GAIN = float(os.getenv("VIS_GAIN", "2.0"))
@@ -49,6 +50,16 @@ VIS_MIN_FLOOR = float(os.getenv("VIS_MIN_FLOOR", "0.02"))
 VIS_SILENCE_DBFS = float(os.getenv("VIS_SILENCE_DBFS", "-55"))
 VIS_ATTACK_ALPHA = float(os.getenv("VIS_ATTACK_ALPHA", "0.55"))
 VIS_RELEASE_ALPHA = float(os.getenv("VIS_RELEASE_ALPHA", "0.70"))
+
+# Final shaping / scaling (NEW)
+# - VIS_COLUMN_GAIN: multiplies ALL 15 viseme columns uniformly before final autoscale.
+# - VIS_SHAPE_GAINS: per-column gains (JSON list of 15 floats, JSON dict {"0":1.1,...}, or CSV "1,1,...").
+# - VIS_TARGET_PEAK: target peak after autoscale; keeps motion big without clipping.
+# - VIS_HARD_CAP: maximum autoscale factor safeguard.
+VIS_TARGET_PEAK = float(os.getenv("VIS_TARGET_PEAK", "0.85"))
+VIS_COLUMN_GAIN = float(os.getenv("VIS_COLUMN_GAIN", "1.00"))
+VIS_SHAPE_GAINS = os.getenv("VIS_SHAPE_GAINS", "").strip()
+VIS_HARD_CAP = float(os.getenv("VIS_HARD_CAP", "3.0"))
 
 # =============================================================================
 # Utilities
@@ -81,7 +92,7 @@ def _mp3_duration_ms(audio_bytes: bytes, fallback_ms: int) -> int:
 # Dense viseme synthesis (ARKit-15, ~duration / MS_PER_FRAME frames)
 # =============================================================================
 
-# ARKit-ish compact indices
+# ARKit-ish compact indices (documented for easy tuning)
 JAW_OPEN, MOUTH_FUNNEL, MOUTH_CLOSE, MOUTH_PUCKER, \
 MOUTH_SMILE_L, MOUTH_SMILE_R, MOUTH_LEFT, MOUTH_RIGHT, \
 MOUTH_FROWN_L, MOUTH_FROWN_R, MOUTH_DIMPLE_L, MOUTH_DIMPLE_R, \
@@ -178,6 +189,9 @@ def _db_to_unit(db: float, floor_db: float) -> float:
     return (db - floor_db) / (0.0 - floor_db)
 
 def _envelope_from_audio_dbfs(audio_bytes: bytes, frames: int) -> List[float]:
+    """
+    Energy envelope (0..1) across frames, robust to silence and dynamics.
+    """
     try:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
         env=[]
@@ -186,24 +200,32 @@ def _envelope_from_audio_dbfs(audio_bytes: bytes, frames: int) -> List[float]:
             db = chunk.dBFS if chunk.dBFS != float("-inf") else VIS_SILENCE_DBFS
             env.append(_db_to_unit(db, VIS_SILENCE_DBFS))
         if env:
+            # Normalize by 90th percentile to avoid outlier spikes flattening motion.
             ref = sorted(env)[max(0, int(0.9*(len(env)-1)))]
             ref = max(ref, 1e-3)
             env = [min(1.0, (e/ref)) for e in env]
         return [min(1.0, VIS_GAIN * (e ** VIS_GAMMA)) for e in env]
     except Exception:
-        # fallback trapezoid
+        # fallback trapezoid (durational ramp up/down)
         return [min(1.0, max(0.0, (min(i, frames-1-i)/max(1, frames//2)))) for i in range(frames)]
 
 def _shape_for_class(cls: str, amp: float) -> List[float]:
+    """
+    Produce a 15-dim ARKit-ish blend vector for a coarse phonetic class at amplitude amp (0..1).
+    """
     out=[0.0]*ARKIT_DIM
     for idx, base in _BASE_SHAPES.get(cls, _BASE_SHAPES["REST"]).items():
         out[idx]=base*amp
+    # mild smile bias for open vowels at higher amplitude
     if cls=="VOWEL" and amp>0.5:
         out[MOUTH_SMILE_L]=min(1.0, out[MOUTH_SMILE_L]+0.05*(amp-0.5))
         out[MOUTH_SMILE_R]=min(1.0, out[MOUTH_SMILE_R]+0.05*(amp-0.5))
     return out
 
 def _spread_lr(shape: List[float], amp: float, drift: float) -> None:
+    """
+    Light per-frame asymmetry + cheek dynamics to avoid robotic symmetry.
+    """
     shape[MOUTH_LEFT]     = 0.08 * amp * max(0.0, 1.0 - abs(drift))
     shape[MOUTH_RIGHT]    = 0.08 * amp * max(0.0, 1.0 - abs(drift))
     shape[MOUTH_DIMPLE_L] = min(1.0, shape[MOUTH_DIMPLE_L] + 0.03 * amp)
@@ -215,6 +237,9 @@ def _smooth(prev: List[float], cur: List[float], alpha: float) -> List[float]:
     return [alpha*p + (1-alpha)*c for p,c in zip(prev,cur)]
 
 def _sequence_classes(text: str, frames: int) -> List[str]:
+    """
+    Expand phoneme (or char) classes to per-frame sequence.
+    """
     classes = _g2p_classes(text or "")
     if not classes:
         chars = [c for c in (text or "") if not c.isspace()]
@@ -222,20 +247,81 @@ def _sequence_classes(text: str, frames: int) -> List[str]:
     span = max(1, len(classes)//frames)
     return [classes[min(i*span, len(classes)-1)] for i in range(frames)]
 
-def _autoscale_frames(frames: List[List[float]], target_peak: float=0.85, hard_cap: float=3.0) -> List[List[float]]:
+# ---------- NEW: gains parsing & application ----------
+
+def _parse_shape_gains(s: str) -> List[float]:
+    """
+    Accept JSON list (len>=15), JSON dict {index: gain}, or CSV.
+    Returns a 15-length list of multipliers, defaulting to 1.0s.
+    """
+    if not s:
+        return [1.0] * ARKIT_DIM
+    # Try JSON
+    try:
+        v = json.loads(s)
+        if isinstance(v, dict):
+            out = [1.0] * ARKIT_DIM
+            for k, val in v.items():
+                try:
+                    idx = int(k)
+                    if 0 <= idx < ARKIT_DIM:
+                        out[idx] = float(val)
+                except Exception:
+                    pass
+            return out
+        if isinstance(v, (list, tuple)) and len(v) >= ARKIT_DIM:
+            return [float(x) for x in v[:ARKIT_DIM]]
+    except Exception:
+        pass
+    # Fallback CSV
+    try:
+        parts = [float(x.strip()) for x in s.split(",")]
+        if len(parts) >= ARKIT_DIM:
+            return parts[:ARKIT_DIM]
+    except Exception:
+        pass
+    return [1.0] * ARKIT_DIM
+
+def _apply_column_gains(frames: List[List[float]], scalar: float, per_shape: List[float]) -> List[List[float]]:
+    """
+    Multiply each column by (scalar * per_shape[i]) and clamp to [0,1].
+    """
+    if not frames:
+        return frames
+    s = scalar if scalar and scalar > 0 else 1.0
+    g = per_shape if per_shape and len(per_shape) == ARKIT_DIM else [1.0] * ARKIT_DIM
+    out: List[List[float]] = []
+    for f in frames:
+        out.append([min(1.0, max(0.0, v * s * g[i])) for i, v in enumerate(f)])
+    return out
+
+def _autoscale_frames(frames: List[List[float]], target_peak: float = VIS_TARGET_PEAK, hard_cap: float = VIS_HARD_CAP) -> List[List[float]]:
+    """
+    Final autoscale so the overall peak approaches target_peak (<=1.0), with a safety hard cap.
+    """
     peak = max((max(f[:ARKIT_DIM]) for f in frames), default=0.0)
-    if peak <= 1e-6: return frames
-    scale = min(hard_cap, max(0.5, target_peak/peak))
-    return [[min(1.0, v*scale) for v in f] for f in frames]
+    if peak <= 1e-6:
+        return frames
+    scale = min(hard_cap, max(0.5, target_peak / peak))
+    return [[min(1.0, v * scale) for v in f] for f in frames]
 
 def _convai_frames(text: str, duration_ms: int, audio_bytes: Optional[bytes]) -> List[List[float]]:
-    if duration_ms <= 0: duration_ms = 300
+    """
+    Main viseme generator:
+      1) envelope & phonetic class sequence
+      2) shape per frame + smoothing + asymmetry
+      3) NEW: per-column gains
+      4) final autoscale toward VIS_TARGET_PEAK
+    """
+    if duration_ms <= 0:
+        duration_ms = 300
     frames = max(1, int(round(duration_ms / MS_PER_FRAME)))
 
     env = _envelope_from_audio_dbfs(audio_bytes, frames) if audio_bytes else [0.35]*frames
     seq = _sequence_classes(text, frames)
 
-    out=[]; prev=[0.0]*ARKIT_DIM
+    out: List[List[float]] = []
+    prev = [0.0]*ARKIT_DIM
     for i in range(frames):
         amp = max(VIS_MIN_FLOOR, min(1.0, env[i]))
         cur = _shape_for_class(seq[i], amp)
@@ -243,9 +329,16 @@ def _convai_frames(text: str, duration_ms: int, audio_bytes: Optional[bytes]) ->
         _spread_lr(cur, amp, drift)
         alpha = VIS_ATTACK_ALPHA if i==0 or amp >= prev[JAW_OPEN] else VIS_RELEASE_ALPHA
         cur = _smooth(prev, cur, alpha)
-        cur = [min(1.0, max(0.0, round(v,3))) for v in cur]
-        out.append(cur); prev=cur
-    return _autoscale_frames(out, target_peak=0.85, hard_cap=3.0)
+        cur = [min(1.0, max(0.0, round(v, 3))) for v in cur]
+        out.append(cur)
+        prev = cur
+
+    # NEW: apply user-configurable column gains
+    per_shape = _parse_shape_gains(VIS_SHAPE_GAINS)
+    out = _apply_column_gains(out, VIS_COLUMN_GAIN, per_shape)
+
+    # Final autoscale to a consistent target peak
+    return _autoscale_frames(out, target_peak=VIS_TARGET_PEAK, hard_cap=VIS_HARD_CAP)
 
 # =============================================================================
 # OpenAI Whisper STT
@@ -412,7 +505,10 @@ async def synthesize_tts_async(text: str, service: str | None, voice_id: str | N
 
     try:
         peak = max((max(frame) for frame in visemes), default=0.0)
-        log.info("[Viseme] frames=%d ms_per_frame=%d peak=%.3f", len(visemes), MS_PER_FRAME, peak)
+        log.info(
+            "[Viseme] frames=%d ms_per_frame=%d peak=%.3f tgt=%.2f gain=%.2f",
+            len(visemes), MS_PER_FRAME, peak, VIS_TARGET_PEAK, VIS_COLUMN_GAIN
+        )
     except Exception:
         pass
 
