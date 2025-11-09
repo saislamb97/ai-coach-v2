@@ -72,7 +72,10 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     "django.contrib.postgres",
 
+    # Celery & CORS
     "corsheaders",
+    "django_celery_beat",
+    "django_celery_results",
 
     "rest_framework",
     "django_filters",
@@ -139,12 +142,16 @@ TEMPLATES = [
 # =============================================================================
 CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", True)
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_HEADERS = list(default_headers)
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "api-key",                      # <-- add your custom header (lowercase)
+    # "authorization",              # already allowed by default_headers, but you can include if you like
+]
 
 CSRF_TRUSTED_ORIGINS: List[str] = [
     "https://*.nudgyt.com",
     "http://127.0.0.1:8002",
     "http://127.0.0.1:3000",
+    "http://localhost:3000",
 ]
 if BASE_URL.startswith(("http://", "https://")):
     CSRF_TRUSTED_ORIGINS.append(BASE_URL)
@@ -182,6 +189,9 @@ DATABASES = {
 # =============================================================================
 REDIS_URL_CACHE    = os.getenv("REDIS_URL_CACHE",    "redis://localhost:6379/1")
 REDIS_URL_CHANNELS = os.getenv("REDIS_URL_CHANNELS", "redis://localhost:6379/2")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/3")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/4")
+
 
 # =============================================================================
 # Cache (Django)
@@ -204,6 +214,18 @@ CHANNEL_LAYERS = {
         "CONFIG": {"hosts": [REDIS_URL_CHANNELS]},
     }
 }
+
+
+# =============================================================================
+# Celery (Redis broker/result)
+# =============================================================================
+# sensible, still minimal
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", os.getenv("TIME_ZONE", "Asia/Kuala_Lumpur"))
+CELERY_TASK_TRACK_STARTED = True
 
 # =============================================================================
 # DRF / Swagger

@@ -8,18 +8,21 @@ from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter
 
 from agent.models import Voice, Agent
-from memory.models import Session, Chat, Slides
+from memory.models import Session, Chat, Slides, Knowledge
 
 from api.auth import ApiKeyAuthentication
 from api.permissions import HasValidAPIKeyAndAllowedOrigin
 from api.mixins import TenantScopedQuerysetMixin
-from api.filters import VoiceFilter, AgentFilter, SessionFilter, ChatFilter, SlidesFilter
+from api.filters import (
+    VoiceFilter, AgentFilter, SessionFilter, ChatFilter, SlidesFilter, KnowledgeFilter
+)
 from api.serializers import (
     VoiceReadSerializer, VoiceWriteSerializer,
     AgentReadSerializer, AgentWriteSerializer,
     SessionReadSerializer, SessionWriteSerializer,
     ChatReadSerializer, ChatWriteSerializer,
     SlidesReadSerializer, SlidesWriteSerializer,
+    KnowledgeReadSerializer, KnowledgeWriteSerializer,
 )
 
 # ---------- Helper mixin: always return READ serializer on writes ----------
@@ -64,7 +67,7 @@ class ReturnReadOnWriteMixin:
         return self.update(request, *args, **kwargs)
 
 
-# ------------------- Swagger shared params (cleaned) -------------------
+# ------------------- Swagger shared params -------------------
 USER_SCOPE_PARAMS = [
     OpenApiParameter(name="user_id", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to user id"),
 ]
@@ -129,9 +132,9 @@ class AgentViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewS
 
 # ------------------- Sessions -------------------
 @extend_schema_view(
-    list=extend_schema(summary="List sessions", parameters=USER_SCOPE_PARAMS),
+    list=extend_schema(summary="List sessions (filterable by bot_id)", parameters=USER_SCOPE_PARAMS),
     retrieve=extend_schema(summary="Retrieve a session by thread_id"),
-    create=extend_schema(summary="Create a session"),
+    create=extend_schema(summary="Create a session (send bot_id, not agent)"),
     update=extend_schema(summary="Update a session"),
     partial_update=extend_schema(summary="Partially update a session"),
     destroy=extend_schema(summary="Delete a session"),
@@ -165,7 +168,7 @@ class SessionViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelVie
 @extend_schema_view(
     list=extend_schema(summary="List chat messages", parameters=USER_SCOPE_PARAMS),
     retrieve=extend_schema(summary="Retrieve a chat message"),
-    create=extend_schema(summary="Create a chat message"),
+    create=extend_schema(summary="Create a chat message (send thread_id, not session)"),
     update=extend_schema(summary="Update a chat message"),
     partial_update=extend_schema(summary="Partially update a chat message"),
     destroy=extend_schema(summary="Delete a chat message"),
@@ -191,7 +194,7 @@ class ChatViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSe
 @extend_schema_view(
     list=extend_schema(summary="List slides", parameters=USER_SCOPE_PARAMS),
     retrieve=extend_schema(summary="Retrieve slides by id"),
-    create=extend_schema(summary="Create/attach slides to a session"),
+    create=extend_schema(summary="Create/attach slides (send thread_id, not session)"),
     update=extend_schema(summary="Update slides"),
     partial_update=extend_schema(summary="Partially update slides"),
     destroy=extend_schema(summary="Delete slides"),
@@ -211,6 +214,39 @@ class SlidesViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelView
 
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
+
+
+# ------------------- Knowledge -------------------
+@extend_schema_view(
+    list=extend_schema(summary="List knowledge files (filterable by bot_id/title/mimetype)", parameters=USER_SCOPE_PARAMS),
+    retrieve=extend_schema(summary="Retrieve a knowledge item"),
+    create=extend_schema(summary="Upload knowledge (send bot_id, not agent)"),
+    update=extend_schema(summary="Update knowledge metadata"),
+    partial_update=extend_schema(summary="Partially update knowledge metadata"),
+    destroy=extend_schema(summary="Delete knowledge"),
+)
+@extend_schema(tags=["Knowledge"])
+class KnowledgeViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
+    queryset = Knowledge.objects.select_related("user", "agent").all()
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
+    filterset_class = KnowledgeFilter
+    search_fields = ["title", "original_name", "mimetype", "agent__name", "agent__bot_id", "sha256"]
+    ordering_fields = ["created_at", "updated_at", "index_status", "mimetype", "size_bytes"]
+    user_lookup_field = "user"
+
+    read_serializer_class = KnowledgeReadSerializer
+    write_serializer_class = KnowledgeWriteSerializer
+
+    def get_queryset(self):
+        return self.scope_to_tenant(super().get_queryset())
+
+    def perform_create(self, serializer):
+        # Ensure user is attached from API key; agent resolved from bot_id in serializer
+        user = self._resolve_auth_user()
+        if not user:
+            raise ValidationError("API key is not linked to a valid user.")
+        serializer.save(user=user)
 
 
 # ------------------- Simple dev test endpoint -------------------

@@ -1,4 +1,3 @@
-# api/urls.py
 from __future__ import annotations
 
 from django.urls import path, include
@@ -10,6 +9,7 @@ from .views import (
     SessionViewSet,
     ChatViewSet,
     SlidesViewSet,
+    KnowledgeViewSet,
     testView,
 )
 
@@ -19,6 +19,7 @@ router.register(r"agents", AgentViewSet, basename="agent")
 router.register(r"sessions", SessionViewSet, basename="session")
 router.register(r"chats", ChatViewSet, basename="chat")
 router.register(r"slides", SlidesViewSet, basename="slides")
+router.register(r"knowledge", KnowledgeViewSet, basename="knowledge")  # ← NEW
 
 app_name = "api"
 

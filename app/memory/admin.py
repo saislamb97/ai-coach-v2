@@ -5,8 +5,11 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 
-from .models import Session, Chat, Slides
-
+from .models import (
+    Session, Chat,
+    Slides, SlidesRevision,
+    Knowledge,
+)
 
 # ==========================================================
 # Utilities
@@ -25,7 +28,7 @@ class PrettyMixin:
 
     @staticmethod
     def _json_pretty(data, max_height: int = 320):
-        if not data:
+        if data in (None, {}, [], ""):
             return mark_safe("<em>—</em>")
         try:
             body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -129,8 +132,27 @@ class ChatAdmin(PrettyMixin, admin.ModelAdmin):
 
 
 # ==========================================================
-# Slides
+# Slides + Revisions
 # ==========================================================
+class SlidesRevisionInline(PrettyMixin, admin.StackedInline):
+    """Read-only inline showing the latest 3 snapshots for quick eye-balling."""
+    model = SlidesRevision
+    extra = 0
+    can_delete = False
+    verbose_name = "Recent revision"
+    verbose_name_plural = "Recent revisions (latest 3)"
+    fields = ("version", "updated_by", "created_at", "title", "summary", "editorjs_pretty")
+    readonly_fields = fields
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.order_by("-version")[:3]
+
+    @admin.display(description="editor.js (pretty)")
+    def editorjs_pretty(self, obj: SlidesRevision):
+        return self._json_pretty(obj.editorjs, max_height=260)
+
+
 @admin.register(Slides)
 class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
     """
@@ -151,16 +173,18 @@ class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
         "session_pretty",
         "version",
         "editorjs_pretty",
-        "previous_editorjs_pretty",
+        "history_latest_html",
     )
 
     fieldsets = (
         ("Session", {"fields": ("session_pretty",)}),
         ("Slides Info", {"fields": ("title", "summary", "version", "updated_by")}),
         ("Current editor.js", {"fields": ("editorjs_pretty",)}),
-        ("Previous Snapshot", {"fields": ("previous_title", "previous_summary", "previous_editorjs_pretty")}),
+        ("History (latest 3)", {"fields": ("history_latest_html",)}),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
+
+    inlines = [SlidesRevisionInline]
 
     @admin.display(description="Thread")
     def session_thread(self, obj: Slides):
@@ -184,8 +208,8 @@ class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
             "<div><b>Thread:</b> {thread}</div>"
             "<div><b>User:</b> {user}</div>"
             "<div><b>Agent:</b> {agent}</div>"
-            "<div><b>Title:</b> {title}</div>"
-            "<div><b>Summary:</b> {summary}</div>"
+            "<div><b>Session Title:</b> {title}</div>"
+            "<div><b>Session Summary:</b> {summary}</div>"
             "</div>",
             thread=sess.thread_id,
             user=sess.user,
@@ -198,6 +222,154 @@ class SlidesAdmin(PrettyMixin, admin.ModelAdmin):
     def editorjs_pretty(self, obj: Slides):
         return self._json_pretty(obj.editorjs, max_height=360)
 
-    @admin.display(description="editor.js (pretty) — previous")
-    def previous_editorjs_pretty(self, obj: Slides):
-        return self._json_pretty(obj.previous_editorjs, max_height=360)
+    @admin.display(description="History (latest 3)")
+    def history_latest_html(self, obj: Slides):
+        revs = obj.session.slide_revisions.order_by("-version")[:3]
+        if not revs:
+            return mark_safe("<em>No revisions yet</em>")
+        items = []
+        for r in revs:
+            items.append(
+                f"<li><b>v{r.version}</b> • {r.updated_by or '—'} • {r.created_at:%Y-%m-%d %H:%M}</li>"
+            )
+        return mark_safe("<ul style='margin:0;padding-left:18px'>" + "".join(items) + "</ul>")
+
+
+@admin.register(SlidesRevision)
+class SlidesRevisionAdmin(PrettyMixin, admin.ModelAdmin):
+    """Browse & revert specific revisions."""
+    date_hierarchy = "created_at"
+    ordering = ("-version", "-created_at")
+    list_select_related = ("session", "session__user", "session__agent")
+    list_per_page = 25
+
+    list_display = ("session_thread", "version", "updated_by", "created_at")
+    list_filter = ("session__agent", "session__user", "updated_by")
+    search_fields = ("session__thread_id", "title", "summary")
+
+    readonly_fields = ("created_at", "updated_at", "session", "version", "title", "summary", "editorjs_pretty", "updated_by")
+
+    fieldsets = (
+        ("Session / Version", {"fields": ("session", "version", "updated_by", "created_at", "updated_at")}),
+        ("Title / Summary", {"fields": ("title", "summary")}),
+        ("editor.js", {"fields": ("editorjs_pretty",)}),
+    )
+
+    actions = ("revert_to_selected",)
+
+    @admin.display(description="Thread")
+    def session_thread(self, obj: SlidesRevision):
+        return getattr(obj.session, "thread_id", "—")
+
+    @admin.display(description="editor.js (pretty)")
+    def editorjs_pretty(self, obj: SlidesRevision):
+        return self._json_pretty(obj.editorjs, max_height=360)
+
+    @admin.action(description="Revert slides to the selected revision(s)")
+    def revert_to_selected(self, request, queryset):
+        count = 0
+        for rev in queryset:
+            slides = getattr(rev.session, "slides", None)
+            if slides is None:
+                slides = Slides.objects.create(session=rev.session, version=0, title="", summary="", editorjs={})
+            slides.revert_to_version(target_version=rev.version, updated_by=f"admin:{request.user}")
+            count += 1
+        self.message_user(request, f"Reverted {count} revision(s). A new current version was created for each revert.")
+
+
+# ==========================================================
+# Knowledge
+# ==========================================================
+@admin.register(Knowledge)
+class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
+    list_select_related = ("user", "agent")
+    list_per_page = 25
+
+    list_display = (
+        "short_name", "agent", "user",
+        "key", "mimetype", "size_kb",
+        "index_status", "created_at",
+    )
+    list_filter = ("agent", "user", "index_status", "mimetype", "created_at")
+    search_fields = ("original_name", "title", "key", "normalized_name", "search_terms")
+
+    readonly_fields = (
+        "created_at", "updated_at",
+        "file_link",
+        "mimetype", "size_bytes", "sha256", "ext",
+        "pages", "rows", "cols",
+        "excerpt_preview", "meta_pretty", "index_meta_pretty",
+        "normalized_name", "search_terms",
+    )
+
+    fields = (
+        ("user", "agent"),
+        ("title", "original_name"),
+        "file",
+        ("mimetype", "ext", "size_bytes"),
+        ("pages", "rows", "cols"),
+        "excerpt",
+        ("index_status",),
+        ("created_at", "updated_at"),
+        "file_link",
+        "normalized_name", "search_terms",
+        "meta_pretty",
+        "index_meta_pretty",
+    )
+
+    actions = ("action_extract_and_index", "mark_unindexed")
+
+    @admin.display(description="Name")
+    def short_name(self, obj: Knowledge):
+        return obj.display_name
+
+    @admin.display(description="Size (KB)")
+    def size_kb(self, obj: Knowledge):
+        try:
+            return f"{obj.size_bytes // 1024:,}"
+        except Exception:
+            return "—"
+
+    @admin.display(description="File")
+    def file_link(self, obj: Knowledge):
+        if not obj.file:
+            return mark_safe("<em>—</em>")
+        url = obj.file.url
+        return mark_safe(f"<a href='{url}' target='_blank' rel='noopener'>download</a>")
+
+    @admin.display(description="Excerpt (preview)")
+    def excerpt_preview(self, obj: Knowledge):
+        return self._preview(obj.excerpt, 600)
+
+    @admin.display(description="Meta")
+    def meta_pretty(self, obj: Knowledge):
+        return self._json_pretty(obj.meta, max_height=240)
+
+    @admin.display(description="Index Meta")
+    def index_meta_pretty(self, obj: Knowledge):
+        return self._json_pretty(obj.index_meta, max_height=240)
+
+    @admin.action(description="Extract & index selected")
+    def action_extract_and_index(self, request, queryset):
+        # optional admin reindex; Celery already does this on create
+        ok = 0
+        for asset in queryset:
+            try:
+                asset.extract_and_index()
+                asset.refresh_search_terms()
+                asset.save(update_fields=[
+                    "size_bytes","mimetype","sha256","ext",
+                    "pages","rows","cols","excerpt","meta",
+                    "index_status","index_meta","normalized_name","search_terms","updated_at"
+                ])
+                ok += 1
+            except Exception:
+                pass
+        self.message_user(request, f"Processed {ok} item(s).")
+
+    @admin.action(description="Mark as unindexed")
+    def mark_unindexed(self, request, queryset):
+        n = queryset.update(index_status=Knowledge.IndexStatus.UNINDEXED)
+        self.message_user(request, f"Marked {n} item(s) as unindexed.")
