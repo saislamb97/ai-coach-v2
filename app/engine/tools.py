@@ -244,6 +244,7 @@ def _slides_upsert_sync(session_id: int, *, title: str, summary: str, editorjs: 
         before_note = f"title={getattr(s, 'title', '')!r}, v={getattr(s, 'version', 0)}" if s else "(none)"
         if not s:
             s = Slides.objects.using(DB_PRIMARY).create(session_id=session_id)
+        # rotate_and_update is assumed to create SlidesRevision entries automatically
         s.rotate_and_update(title=title or "Untitled Deck", summary=summary or "", editorjs=editorjs, updated_by=updated_by)
         s.refresh_from_db(using=DB_PRIMARY)
         return s, before_note
@@ -537,16 +538,17 @@ async def _llm_analyze_sources(*, question: str, sources: List[Dict[str, Any]], 
 # Input Schemas
 # --------------------------------------------------------------------------------------
 class SlidesGenerateInput(BaseModel):
-    prompt: Optional[str] = Field(None, description="Natural language request for the deck")
-    title: Optional[str] = Field(None, description="Deck title (optional)")
-    summary: Optional[str] = Field(None, description="Short abstract (optional)")
-    editorjs: Optional[EditorJS | List[Dict[str, Any]]] = Field(None, description="Editor.js doc or blocks[]")
-    context: Optional[str] = Field(None, description="Brief topic context (optional)")
-    max_sections: int = Field(6, ge=4, le=16, description="Max sections (title + 3..5 slides enforced)")
+    prompt: Optional[str] = Field(None, description="Topic / natural language request for the deck. Will ALWAYS create a new deck.")
+    title: Optional[str] = Field(None, description="Deck title (optional; if omitted, inferred from outline).")
+    summary: Optional[str] = Field(None, description="Short abstract (optional).")
+    editorjs: Optional[EditorJS | List[Dict[str, Any]]] = Field(None, description="(Ignored) Existing content is not used; a fresh deck is generated.")
+    context: Optional[str] = Field(None, description="Additional context for the deck (optional).")
+    max_sections: int = Field(6, ge=4, le=16, description="Upper bound for sections; final total slides = title + 3..5 sections.")
 
     @field_validator("editorjs")
     @classmethod
     def _validate_editorjs(cls, v):
+        # Keep validator so callers passing editorjs don't crash, but this input is ignored in generation.
         if v is None:
             return v
         ej = normalize_editorjs(v)
@@ -615,16 +617,25 @@ async def _format_slides_response(s: Slides) -> Dict[str, Any]:
 @tool(
     "slides_generate_or_update",
     args_schema=SlidesGenerateInput,
-    description="Create or update slides. Returns a summary and {version,title,summary,editorjs,updated_at}.",
+    description=(
+        "ALWAYS create a brand-new slide deck (title + 3..5 sections => 4–6 slides total), "
+        "replace the existing deck, and rotate the previous into SlidesRevision with a new version. "
+        "Returns a summary plus {version,title,summary,editorjs,updated_at}."
+    ),
 )
 async def slides_generate_or_update(
     prompt: Optional[str] = None,
     title: Optional[str] = None,
     summary: Optional[str] = None,
-    editorjs: Optional[EditorJS] = None,
+    editorjs: Optional[EditorJS] = None,  # ignored
     context: Optional[str] = None,
     max_sections: int = 6,
 ) -> Dict[str, Any]:
+    """
+    Always generates a fresh deck from prompt/title/context, enforces 4–6 slides (title + 3..5 sections),
+    normalizes to Editor.js (header/paragraph/list), replaces the current deck, and keeps version history.
+    Also produces a change summary by diffing against the previous SlidesRevision (if any).
+    """
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
@@ -634,35 +645,60 @@ async def slides_generate_or_update(
     title_clean = _strip_ctrl((title or "").strip())
     summary_clean = _strip_ctrl((summary or "").strip())
     context_clean = _strip_ctrl((context or "").strip())
-    ej = normalize_editorjs(editorjs) if editorjs is not None else None
 
-    # Build outline if none provided
-    if not (title_clean or summary_clean or (ej and ej.get("blocks"))):
-        ej = await _llm_outline_to_editorjs(
-            prompt=prompt_clean or "Untitled Deck",
-            context=context_clean,
-            max_sections=max_sections,
-        )
-        first_header = next((b for b in ej["blocks"] if b["type"] == "header"), None)
-        if first_header:
-            title_clean = title_clean or first_header["data"].get("text", "Untitled Deck")
+    # 1) Always build a new outline (ignore incoming editorjs entirely)
+    seed = title_clean or prompt_clean or "Untitled Deck"
+    ej = await _llm_outline_to_editorjs(
+        prompt=seed,
+        context=context_clean,
+        max_sections=max_sections,
+    )
 
-    # Normalize and guarantee single top header
+    # If caller supplied a specific title, force it as the top H2
     if ej and ej.get("blocks"):
         ej = normalize_editorjs(
-            {"time": _now_ms(), "version": "2.x", "blocks": _ensure_single_top_header(ej["blocks"], title_clean)}
+            {"time": _now_ms(), "version": "2.x", "blocks": _ensure_single_top_header(ej["blocks"], title_clean or None)}
         ) or ej
     if not ej:
         ej = minimal_editorjs(title_clean or (prompt_clean[:80] if prompt_clean else "Untitled Deck"), summary_clean or "")
 
     try:
+        # 2) Persist new deck (rotate_and_update maintains SlidesRevision + versioning)
         s, before_note = await _slides_upsert_sync(
-            session_id, title=title_clean or "Untitled Deck", summary=summary_clean or "", editorjs=ej, updated_by="tool:slides"
+            session_id,
+            title=(title_clean or (ej["blocks"][0]["data"]["text"] if ej.get("blocks") else "Untitled Deck")),
+            summary=summary_clean or "",
+            editorjs=ej,
+            updated_by="tool:slides_generate_or_update:new_deck",
         )
-        data = {"slides": await _format_slides_response(s)}
+
+        # 3) Compute diff vs previous revision (if present)
+        latest, prev = await _slides_get_revision_sync(session_id, None)  # latest is current Slides; prev is SlidesRevision
+        changes: List[str] = []
+        if prev:
+            try:
+                changes = _summarize_editorjs_diff(prev.editorjs or {}, latest.editorjs or {})
+            except Exception:
+                changes = []
+        # LLM micro-summary (uses high-level before/after note so it works even if prev missing)
         after_note = f"title={s.title!r}, v={s.version}"
-        summary_out = await _llm_summarize_change(title=s.title or "Untitled Deck", before_note=before_note, after_note=after_note)
+        llm_summary = await _llm_summarize_change(
+            title=s.title or "Deck",
+            before_note=(f"title={getattr(prev, 'title', '')!r}, v={getattr(prev, 'version', 0)}") if prev else "(none)",
+            after_note=after_note,
+        )
+
+        # 4) Build response
+        data = {"slides": await _format_slides_response(s)}
+        if prev and changes:
+            summary_out = f"{llm_summary}\n- " + "\n- ".join(changes[:6])
+        elif prev:
+            summary_out = f"{llm_summary}"
+        else:
+            summary_out = f"Created new deck v{s.version} titled “{s.title or 'Untitled Deck'}”."
+
         return {"status": "ok", "summary": summary_out, "data": data}
+
     except Exception as e:
         log.exception("[slides_generate_or_update] persist error")
         return {"status": "failed", "summary": f"Failed to save slides: {e}", "data": {}}
@@ -993,7 +1029,7 @@ async def emotion_detect(text: str) -> Dict[str, Any]:
             name = "Joy"
         if inten < 1 or inten > 3:
             inten = 1
-        return {"status": "ok", "summary": f"Detected {name} ({inten}/3).", "data": {"name": name, "intensity": inten}}
+        return {"status": "ok", "summary": f"Detected {name} ({inten}/3).", "data": {"name": "Joy", "intensity": inten}}
     except Exception:
         return {"status": "ok", "summary": "Defaulted to Joy (1/3).", "data": {"name": "Joy", "intensity": 1}}
 

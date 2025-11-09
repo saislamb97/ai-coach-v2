@@ -42,7 +42,35 @@ function stableHash(obj: any): string {
 }
 const nowFmt = () => new Date().toLocaleTimeString()
 
-export default function SlidesPane({ className='', incoming, streaming=false }: Props){
+/** Returns true if the EditorJS data has any meaningful user content */
+function editorHasContent(data?: OutputData | null): boolean {
+  if (!data || !Array.isArray((data as any).blocks)) return false
+  const blocks = (data as any).blocks as Array<any>
+  if (!blocks.length) return false
+
+  for (const b of blocks) {
+    if (!b || typeof b !== 'object') continue
+    const t = String(b.type || '').toLowerCase()
+    const d = (b.data ?? {}) as any
+
+    if (t === 'header') {
+      const text = String(d.text ?? '').trim()
+      if (text) return true
+    } else if (t === 'paragraph') {
+      const text = String(d.text ?? '').replace(/<[^>]*>/g, '').trim()
+      if (text) return true
+    } else if (t === 'list') {
+      const items = Array.isArray(d.items) ? d.items : []
+      if (items.some((x: any) => String(x ?? '').trim().length > 0)) return true
+    } else {
+      // Any other block type with some data counts as content
+      if (Object.values(d).some((v) => (typeof v === 'string' ? v.trim().length > 0 : !!v))) return true
+    }
+  }
+  return false
+}
+
+export default function SlidesPane({ className = '', incoming, streaming = false }: Props) {
   const holderId = React.useMemo(
     () => `slides-editor-${(crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
     []
@@ -61,8 +89,10 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
 
   // user activity (avoid clobbering caret while typing)
   const lastEditTsRef = React.useRef<number>(0)
-  const markEdited = () => { lastEditTsRef.current = Date.now() }
-  const userActive = () => (Date.now() - lastEditTsRef.current) < 900 // ms
+  const markEdited = () => {
+    lastEditTsRef.current = Date.now()
+  }
+  const userActive = () => Date.now() - lastEditTsRef.current < 900 // ms
 
   // queued AI updates (when user is active)
   const [queuedAI, setQueuedAI] = React.useState<Slides | null>(null)
@@ -73,7 +103,7 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
     version: '2.x',
     blocks: [],
   })
-  const readyRef = React.useRef(false)
+  const readyRef = React.useRef(false) // becomes true after initial fetch/attempt completes
 
   // ------------- init -------------
   React.useEffect(() => {
@@ -103,12 +133,16 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
           setEjData(data)
           markEdited()
         } catch {}
-      }
+      },
     })
 
     ;(async () => {
       const thread_id = getThreadId()
-      if (!thread_id) { readyRef.current = true; return }
+      if (!thread_id) {
+        // No thread: mark ready so autosave guard can still run, but doSave() will return early due to no thread id.
+        readyRef.current = true
+        return
+      }
       try {
         const qs = new URLSearchParams({ thread_id, ordering: '-updated_at' }).toString()
         const res = await get<any>(`/api/slides/?${qs}`)
@@ -130,20 +164,25 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
             await ej.current?.render(latest.editorjs)
             setEjData(latest.editorjs)
           } finally {
-            setTimeout(()=>{ silenceAutosaveRef.current = false }, 0)
+            setTimeout(() => {
+              silenceAutosaveRef.current = false
+            }, 0)
           }
           const hash = stableHash({ t: latest.title || '', s: latest.summary || '', e: latest.editorjs })
           lastSavedHashRef.current = hash
           setSavedAt(nowFmt())
         }
       } finally {
+        // Mark ready after fetch attempt completes (whether or not data existed)
         readyRef.current = true
       }
     })()
 
     return () => {
       mounted = false
-      try { ej.current?.destroy() } catch {}
+      try {
+        ej.current?.destroy()
+      } catch {}
       ej.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -155,8 +194,11 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
     const next: Slides = {
       title: String(incoming.title ?? title ?? ''),
       summary: String(incoming.summary ?? summary ?? ''),
-      editorjs: (incoming.editorjs && typeof incoming.editorjs === 'object') ? incoming.editorjs as OutputData : ejData,
-      version: Number(incoming.version || versionRef.current) || versionRef.current
+      editorjs:
+        incoming.editorjs && typeof incoming.editorjs === 'object'
+          ? (incoming.editorjs as OutputData)
+          : ejData,
+      version: Number(incoming.version || versionRef.current) || versionRef.current,
     }
 
     // Ignore stale versions
@@ -181,7 +223,9 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
         setEjData(next.editorjs)
       } finally {
         setApplying(false)
-        setTimeout(()=>{ silenceAutosaveRef.current = false }, 0)
+        setTimeout(() => {
+          silenceAutosaveRef.current = false
+        }, 0)
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -195,7 +239,7 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
     setApplying(true)
     silenceAutosaveRef.current = true
     try {
-      versionRef.current = q.version ?? (versionRef.current + 1)
+      versionRef.current = q.version ?? versionRef.current + 1
       setTitle(q.title || '')
       setSummary(q.summary || '')
       await ej.current?.isReady
@@ -203,7 +247,9 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
       setEjData(q.editorjs)
     } finally {
       setApplying(false)
-      setTimeout(()=>{ silenceAutosaveRef.current = false }, 0)
+      setTimeout(() => {
+        silenceAutosaveRef.current = false
+      }, 0)
     }
   }, [queuedAI])
 
@@ -216,6 +262,12 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
     if (!readyRef.current || silenceAutosaveRef.current) return
     const thread_id = getThreadId()
     if (!thread_id) return
+
+    // ⛔️ Skip saving if slide is effectively empty
+    const noTitle = !title.trim()
+    const noSummary = !summary.trim()
+    const noBlocks = !editorHasContent(ejData)
+    if (noTitle && noSummary && noBlocks) return
 
     const payload = {
       thread_id,
@@ -241,9 +293,9 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
     }
   }, [title, summary, ejData])
 
-  useDebounce(() => { void doSave() }, [title, summary, ejData])
-
-  // NOTE: manual Save/Revert buttons & Ctrl/Cmd+S handler removed per request
+  useDebounce(() => {
+    void doSave()
+  }, [title, summary, ejData])
 
   const Sep = () => <span className="text-slate-300">•</span>
 
@@ -278,11 +330,15 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
               <button
                 onClick={applyQueued}
                 className="ml-1 rounded bg-violet-600 text-white px-1.5 py-[1px] hover:bg-violet-700"
-              >Apply</button>
+              >
+                Apply
+              </button>
               <button
                 onClick={discardQueued}
                 className="rounded border border-violet-300 px-1.5 py-[1px] hover:bg-violet-50"
-              >Discard</button>
+              >
+                Discard
+              </button>
             </span>
           </>
         )}
@@ -307,14 +363,20 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
           className="rounded border border-slate-300 bg-white text-slate-900 placeholder-slate-400 p-2 text-base font-semibold"
           placeholder="Slide title"
           value={title}
-          onChange={e=>{ setTitle(e.target.value); markEdited() }}
+          onChange={(e) => {
+            setTitle(e.target.value)
+            markEdited()
+          }}
         />
         <textarea
           className="rounded border border-slate-300 bg-white text-slate-900 placeholder-slate-400 p-2 text-sm"
           placeholder="Short description"
           rows={3}
           value={summary}
-          onChange={e=>{ setSummary(e.target.value); markEdited() }}
+          onChange={(e) => {
+            setSummary(e.target.value)
+            markEdited()
+          }}
         />
       </div>
 
