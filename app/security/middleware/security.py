@@ -28,8 +28,8 @@ log = logging.getLogger(__name__)
 class SecurityMiddleware(MiddlewareMixin):
     def __init__(self, get_response):
         self.get_response = get_response
-        # Allow override via settings; default to 'core:api-doc'
-        self.home_url_name = getattr(settings, "SECURITY_HOME_URL_NAME", "core:api-doc")
+        # Allow override via settings; default to 'core:home'
+        self.home_url_name = getattr(settings, "SECURITY_HOME_URL_NAME", "core:home")
         self.home_url = reverse(self.home_url_name)
         super().__init__(get_response)
 

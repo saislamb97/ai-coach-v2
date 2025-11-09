@@ -8,7 +8,7 @@ type UsePTTOpts = {
   onSend: (payload: { base64Audio: string; format: 'webm' | 'm4a' | 'ogg' }) => void
 }
 
-export function usePTT({ muted, onSend }: UsePTTOpts) {
+export function usePTT({ onSend }: UsePTTOpts) {
   const [micSupported, setMicSupported] = React.useState<boolean>(true)
   const [micState, setMicState] = React.useState<MicState>('idle')
   const recStream = React.useRef<MediaStream | null>(null)

@@ -334,8 +334,9 @@ JAZZMIN_SETTINGS = {
 
     # Top Menu Links (for quick navigation)
     "topmenu_links": [
-        {"name": "Home", "url": "core:api-doc", "new_window": True},
-        {"name": "API", "url": "swagger-ui", "new_window": True},
+        {"name": "Home", "url": "core:home", "new_window": True},
+        {"name": "Doc", "url": "core:doc", "new_window": True},
+        {"name": "Swagger", "url": "swagger-ui", "new_window": True},
         {"name": "Test", "url": "api:test", "new_window": True},
     ],
 

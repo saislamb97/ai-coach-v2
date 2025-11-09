@@ -19,7 +19,7 @@ export function useAudioQueue({ getVisemeFrameRef, muted }: UseAudioQueueOpts) {
     times: [],
   })
   const playing = React.useRef(false)
-  const raf = React.useRef<number | undefined>()
+  const raf = React.useRef<number | null>(null)
   const lastIdx = React.useRef(0)
   const clockStartRef = React.useRef<number | null>(null)
 

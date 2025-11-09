@@ -10,6 +10,7 @@ from .views import (
     ChatViewSet,
     SlidesViewSet,
     KnowledgeViewSet,
+    docView,
     testView,
 )
 
@@ -26,4 +27,5 @@ app_name = "api"
 urlpatterns = [
     path("", include(router.urls)),
     path("test/", testView, name="test"),
+    path("doc/", docView, name="doc"),
 ]

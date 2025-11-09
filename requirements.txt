@@ -48,6 +48,7 @@ django-cors-headers==4.7.0
 django-crispy-forms==2.4
 django-csp==4.0
 django-filter==25.1
+django-jazzmin==3.0.1
 django-markdown-deux==1.0.6
 django-simpleui==2025.6.24
 django-storages==1.14.6

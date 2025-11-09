@@ -1,0 +1,466 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light only">
+  <title>AI Coach — Realtime Chat (WebSocket) & REST API</title>
+
+  <!-- Tailwind (with Typography plugin) -->
+  <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+
+  <!-- Highlight.js for code syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <style>
+    html, body { background:#f8fafc; }
+    .prose pre { background:#f2f4f8; color:#021022; border-radius: .75rem; }
+    .prose pre code.hljs { background:transparent; color:inherit; }
+    .prose :not(pre) > code { background:#eef2f7; color:#334155; padding:.12rem .4rem; border-radius:.35rem; }
+    .scroll-shadow {
+      -webkit-mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+              mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+  <header class="border-b border-slate-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
+      <div class="flex items-center gap-3">
+        <div class="h-8 w-8 rounded-xl bg-indigo-600"></div>
+        <div class="leading-tight">
+          <div class="text-sm font-semibold text-slate-900">AI Coach — Platform API</div>
+          <div class="text-xs text-slate-500">Realtime Chat (WebSocket) & REST</div>
+        </div>
+      </div>
+      <div class="text-xs text-slate-500">
+        Version <span class="font-semibold text-slate-700">1.2.0</span> • 2025-11-10
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-8">
+    <!-- Intro cards -->
+    <section class="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Base URL</div>
+        <div class="mt-1 font-semibold">
+          <a href="https://ai-coach-pmkn.onrender.com/" class="text-indigo-700 underline">https://ai-coach-pmkn.onrender.com/</a>
+        </div>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Realtime</div>
+        <div class="mt-1 font-semibold">WebSocket chat + TTS + visemes</div>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Persistence</div>
+        <div class="mt-1 font-semibold">Sessions, Chats, Slides, Documents</div>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Auth</div>
+        <div class="mt-1 font-semibold">API Key + Origin/Host/IP allow-list</div>
+      </div>
+    </section>
+
+    <!-- Important URLs -->
+    <section class="prose prose-slate max-w-none">
+      <h2>Important URLs</h2>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[720px] w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Name</th>
+              <th class="px-4 py-3 font-semibold">URL</th>
+              <th class="px-4 py-3 font-semibold">Notes</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="px-4 py-3 font-medium">Admin</td>
+              <td class="px-4 py-3"><a class="text-indigo-700 underline" href="/admin/">/admin/</a></td>
+              <td class="px-4 py-3">Create API Keys, Voices, Agents, Sessions, etc.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Swagger UI</td>
+              <td class="px-4 py-3"><a class="text-indigo-700 underline" href="/api/schema/swagger-ui/">/api/schema/swagger-ui/</a></td>
+              <td class="px-4 py-3">Interactive REST docs (Authorize with API key)</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">ReDoc</td>
+              <td class="px-4 py-3"><a class="text-indigo-700 underline" href="/api/schema/redoc/">/api/schema/redoc/</a></td>
+              <td class="px-4 py-3">Reference REST docs</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Raw OpenAPI JSON</td>
+              <td class="px-4 py-3"><a class="text-indigo-700 underline" href="/api/schema/">/api/schema/</a></td>
+              <td class="px-4 py-3">OpenAPI schema (DRF Spectacular)</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Test Console</td>
+              <td class="px-4 py-3"><a class="text-indigo-700 underline" href="/api/test/">/api/test/</a></td>
+              <td class="px-4 py-3">WS &amp; REST playground</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Setup flow -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Getting Started (Admin-first flow)</h2>
+      <div class="grid gap-4 md:grid-cols-2">
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">1) Create API Key (User ▶ ApiAuth)</h3>
+          <ul>
+            <li>Go to <span class="font-mono">/admin/</span> → <strong>ApiAuths</strong> → <em>Add</em>.</li>
+            <li>Choose the owning <strong>User</strong>, set a <strong>Name</strong>, and (optionally) a description.</li>
+            <li>Set <strong>Allowed Origins/Hosts/IPs</strong> to include your frontend (e.g. <code>http://localhost:3000</code>).</li>
+            <li>Save to generate <strong>api_key</strong>. Use it via:
+              <ul>
+                <li><code>Authorization: Api-Key &lt;YOUR_API_KEY&gt;</code> (recommended)</li>
+                <li>or query param <code>?api_key=…</code>, or cookie <code>api_key=…</code></li>
+              </ul>
+            </li>
+          </ul>
+          <p class="text-xs text-slate-500">Note: Origin/Referer host, Host header, or client IP/CIDR must match the allow-list.</p>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">2) Create Voice (Agent ▶ Voice)</h3>
+          <ul>
+            <li>Go to <span class="font-mono">/admin/</span> → <strong>Voices</strong> → <em>Add</em>.</li>
+            <li>Pick <strong>service</strong> (<code>gtts</code>, <code>elevenlabs</code>, or <code>openai</code>).</li>
+            <li>Set <strong>voice_id</strong> (<code>gtts::en@com</code>, <code>openai::alloy</code>, etc.).</li>
+          </ul>
+          <p class="text-xs text-slate-500">Agents require a valid voice; creation will auto-attach the first Voice if none provided.</p>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">3) Create Agent</h3>
+          <ul>
+            <li>Go to <span class="font-mono">/admin/</span> → <strong>Agents</strong> → <em>Add</em>.</li>
+            <li>Attach <strong>User</strong> & a <strong>Voice</strong>, set <strong>Name</strong> and optional <strong>Persona</strong>.</li>
+            <li>Save to obtain <strong>bot_id</strong> (UUID).</li>
+          </ul>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">4) Create Session (Memory ▶ Session)</h3>
+          <ul>
+            <li>Go to <span class="font-mono">/admin/</span> → <strong>Sessions</strong> → <em>Add</em>.</li>
+            <li>Select <strong>User</strong> & <strong>Agent</strong>. A unique <strong>thread_id</strong> is generated like <code>user_&lt;16hex&gt;</code>.</li>
+          </ul>
+          <p class="text-xs text-slate-500">You can also create sessions (and thus thread IDs) via REST.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- WebSocket -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Realtime WebSocket</h2>
+
+      <h3>Endpoint</h3>
+      <pre><code class="language-http">wss://ai-coach-pmkn.onrender.com/ws/chat/?bot_id=&lt;uuid&gt;&amp;thread_id=&lt;user_16hex&gt;&amp;website_language=en</code></pre>
+
+      <h3>Authentication & Allow-list</h3>
+      <ul>
+        <li>Provide API key via one of: <code>Authorization: Api-Key &lt;KEY&gt;</code> (recommended), <code>?api_key=</code>, or cookie <code>api_key=</code>.</li>
+        <li>At least one allow-list check must pass: Origin/Referer host, Host header, or client IP/CIDR.</li>
+      </ul>
+
+      <h3>Query Parameters</h3>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[640px] w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr><th class="px-4 py-2">Param</th><th class="px-4 py-2">Type</th><th class="px-4 py-2">Notes</th></tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-4 py-2 font-mono">bot_id</td><td class="px-4 py-2">UUID</td><td class="px-4 py-2">Agent identifier</td></tr>
+            <tr><td class="px-4 py-2 font-mono">thread_id</td><td class="px-4 py-2">string</td><td class="px-4 py-2">Must match <code>^user_[0-9a-f]{16}$</code> and exist for that agent</td></tr>
+            <tr><td class="px-4 py-2 font-mono">website_language</td><td class="px-4 py-2">string</td><td class="px-4 py-2">UI hint (e.g., <code>en</code>)</td></tr>
+            <tr><td class="px-4 py-2 font-mono">api_key</td><td class="px-4 py-2">string</td><td class="px-4 py-2">Optional if using header/cookie</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Limits & Behavior</h3>
+      <ul>
+        <li><strong>Inbound message rate</strong>: up to <code>20 Hz</code> (excess ignored).</li>
+        <li><strong>Audio upload size</strong>: up to <code>25 MiB</code>.</li>
+        <li><strong>Audio formats</strong>: auto-detected from data URL or <code>format</code> hint (<code>webm</code>, <code>wav</code>, <code>m4a</code>, <code>ogg</code>, <code>mp3</code>).</li>
+        <li><strong>STT model</strong>: <span class="font-mono">OPENAI_STT_MODEL</span> env (default <span class="font-mono">whisper-1</span>).</li>
+        <li><strong>Thread safety</strong>: one active run at a time; new queries cancel the previous run.</li>
+      </ul>
+
+      <h3>Event Reference</h3>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[860px] w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Type</th>
+              <th class="px-4 py-3 font-semibold">Dir</th>
+              <th class="px-4 py-3 font-semibold">Payload (summary)</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-4 py-3 font-mono">connected</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ bot_id, thread_id }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_query</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Echo <code>{ text, local_time }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_start</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Run started</td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_token</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Token stream <code>{ token }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_sentence</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Finalized sentence <code>{ text, local_time, emotion? }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">emotion</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ emotion:{ name, intensity } }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">audio_muted</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ muted:boolean }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">audio_response</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">MP3 chunk + visemes (see shape)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">slides_response</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ slides:{ version, title, summary, editorjs, updated_at } }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">slides_done</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">No more slide updates for run</td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_done</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Timings <code>{ timings:{ prepare_ms, run_ms, ws_total_sec } }</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">response_ended</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Run cleanup marker</td></tr>
+            <tr><td class="px-4 py-3 font-mono">ping</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Liveness check</td></tr>
+            <tr><td class="px-4 py-3 font-mono">pong</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3">Ping reply</td></tr>
+            <tr><td class="px-4 py-3 font-mono">mute_audio / unmute_audio</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Toggle TTS streaming</td></tr>
+            <tr><td class="px-4 py-3 font-mono">stop_audio</td><td class="px-4 py-3">C→S / S→C</td><td class="px-4 py-3">Client stop request / server ack</td></tr>
+            <tr><td class="px-4 py-3 font-mono">text_query / audio_query</td><td class="px-4 py-3">C→S</td><td class="px-4 py-3">Start a run (see payloads below)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">error</td><td class="px-4 py-3">S→C</td><td class="px-4 py-3"><code>{ message }</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Client → Server Payloads</h3>
+      <pre><code class="language-json">{
+  "type": "text_query",
+  "text": "Hello there",
+  "local_time": "2025-11-05 10:00:00",
+  "muteAudio": false
+}
+{
+  "type": "audio_query",
+  "audio": "data:audio/webm;base64,AAAA…",   // or plain base64
+  "format": "webm",                           // hint when not a data URL: webm|wav|m4a|ogg|mp3
+  "muteAudio": true
+}
+{ "type": "mute_audio" }
+{ "type": "unmute_audio" }
+{ "type": "stop_audio" }
+{ "type": "ping" }</code></pre>
+
+      <h3>Server → Client Audio & Visemes</h3>
+      <p>TTS is streamed in MP3 chunks with synchronized <strong>ARKit-15</strong> visemes.</p>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[860px] w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr><th class="px-4 py-3 font-semibold">Field</th><th class="px-4 py-3 font-semibold">Type</th><th class="px-4 py-3 font-semibold">Notes</th></tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-4 py-3 font-mono">audio</td><td class="px-4 py-3">string (base64)</td><td class="px-4 py-3">MP3 bytes (base64)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">audio_format</td><td class="px-4 py-3">string</td><td class="px-4 py-3"><code>"mp3"</code></td></tr>
+            <tr><td class="px-4 py-3 font-mono">viseme</td><td class="px-4 py-3">number[ ][15]</td><td class="px-4 py-3">ARKit-15 frames</td></tr>
+            <tr><td class="px-4 py-3 font-mono">viseme_times</td><td class="px-4 py-3">number[ ]</td><td class="px-4 py-3">Per-frame timestamps (sec)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">viseme_format</td><td class="px-4 py-3">string</td><td class="px-4 py-3"><code>"arkit15"</code> (profile <code>arkit15-v2</code>)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">viseme_fps</td><td class="px-4 py-3">number</td><td class="px-4 py-3">Derived FPS</td></tr>
+            <tr><td class="px-4 py-3 font-mono">duration_ms</td><td class="px-4 py-3">number</td><td class="px-4 py-3">Estimated clip duration</td></tr>
+            <tr><td class="px-4 py-3 font-mono">frame_ms</td><td class="px-4 py-3">number</td><td class="px-4 py-3">Per-frame step (ms)</td></tr>
+            <tr><td class="px-4 py-3 font-mono">chunk_index</td><td class="px-4 py-3">number</td><td class="px-4 py-3">Monotonic chunk index</td></tr>
+            <tr><td class="px-4 py-3 font-mono">offset_ms</td><td class="px-4 py-3">number</td><td class="px-4 py-3">Timeline offset from run start</td></tr>
+            <tr><td class="px-4 py-3 font-mono">local_time</td><td class="px-4 py-3">string</td><td class="px-4 py-3">Client-local echo</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Slides Streaming</h3>
+      <p>During a run, the agent tools may emit slide updates:</p>
+      <pre><code class="language-json">{
+  "type":"slides_response",
+  "slides": { "version":3, "title":"Week Plan", "summary":"...", "editorjs":{ /* Editor.js */ }, "updated_at":"2025-11-05T10:00:05Z" },
+  "local_time":"2025-11-05 10:00:05"
+}
+{"type":"slides_done"}</code></pre>
+
+      <h3>Close Codes</h3>
+      <ul>
+        <li><code>4403</code> — auth failed (bad/missing API key or allow-list)</li>
+        <li><code>4000</code> — missing required query params</li>
+        <li><code>4004</code> — agent not found/inactive</li>
+        <li><code>4005</code> — invalid <code>thread_id</code> pattern or session not found</li>
+      </ul>
+    </section>
+
+    <!-- REST -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>REST API Overview</h2>
+      <p>All endpoints require a valid user session and API key with an allowed origin.</p>
+      <ul>
+        <li><strong>Base Path:</strong> <span class="font-mono">/api/</span></li>
+        <li><strong>Auth:</strong> <span class="font-mono">Authorization: Api-Key &lt;YOUR_API_KEY&gt;</span></li>
+        <li><strong>Docs:</strong> Swagger UI / ReDoc (see URLs above). DRF Spectacular supports “Authorize” with API key.</li>
+      </ul>
+
+      <h3>Resources</h3>
+      <div class="not-prose overflow-x-auto scroll-shadow rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-[880px] w-full text-sm">
+          <thead class="bg-slate-50 text-left text-slate-600">
+            <tr>
+              <th class="px-4 py-3 font-semibold">Entity</th>
+              <th class="px-4 py-3 font-semibold">Endpoint</th>
+              <th class="px-4 py-3 font-semibold">Lookup</th>
+              <th class="px-4 py-3 font-semibold">Notes</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr>
+              <td class="px-4 py-3 font-medium">Voice</td>
+              <td class="px-4 py-3"><code>/api/voice/</code></td>
+              <td class="px-4 py-3">id</td>
+              <td class="px-4 py-3">List / create voices (<code>service</code>, <code>voice_id</code>, <code>gender</code>, optional preview)</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Agent</td>
+              <td class="px-4 py-3"><code>/api/agent/</code></td>
+              <td class="px-4 py-3"><code>bot_id</code> (UUID)</td>
+              <td class="px-4 py-3">Create via REST (auto-assigns the API key’s user). Requires a Voice.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Session</td>
+              <td class="px-4 py-3"><code>/api/session/</code></td>
+              <td class="px-4 py-3"><code>thread_id</code> (e.g., <code>user_ab12cd34ef56gh78</code>)</td>
+              <td class="px-4 py-3">Create via REST by sending <code>bot_id</code>. Generates <strong>thread_id</strong> dynamically.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Chat</td>
+              <td class="px-4 py-3"><code>/api/chat/</code></td>
+              <td class="px-4 py-3">id</td>
+              <td class="px-4 py-3">Persist/query history. Writes accept <code>thread_id</code>.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Slides</td>
+              <td class="px-4 py-3"><code>/api/slides/</code></td>
+              <td class="px-4 py-3">id</td>
+              <td class="px-4 py-3">Attach & version slide decks to a session. Writes accept <code>thread_id</code>.</td>
+            </tr>
+            <tr>
+              <td class="px-4 py-3 font-medium">Knowledge (Documents)</td>
+              <td class="px-4 py-3"><code>/api/knowledge/</code></td>
+              <td class="px-4 py-3">id</td>
+              <td class="px-4 py-3">Upload via JSON: <code>{ bot_id, name, file_b64 }</code>. Supports DOC, TXT, Excel, CSV, PDF.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Typical Write Payloads</h3>
+      <pre><code class="language-json">// Agent (POST /api/agent/)
+{
+  "voice": 1,
+  "name": "Coach Ava",
+  "persona": "Friendly, concise productivity coach",
+  "max_tokens": 300,
+  "is_active": true
+}
+
+// Session (POST /api/session/)  → returns thread_id
+{
+  "bot_id": "6a97a3c4-5d25-47a8-bb31-b6f35c98e6b7",
+  "title": "Weekly Planning"
+}
+
+// Knowledge upload (POST /api/knowledge/)
+{
+  "bot_id": "6a97a3c4-5d25-47a8-bb31-b6f35c98e6b7",
+  "name": "roadmap.pdf",
+  "file_b64": "data:application/pdf;base64,AAA..."
+}</code></pre>
+
+      <p class="text-sm text-slate-600">
+        <strong>Filters & lookups:</strong> Agents are retrieved by <code>bot_id</code>; Sessions by <code>thread_id</code>.
+        REST responses include read-optimized fields (e.g., user & voice names, file URLs where available).
+      </p>
+    </section>
+
+    <!-- Tools & Capabilities -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>LLM Tools & Slide Operations</h2>
+      <p>The runtime exposes high-level tools. When invoked, they can stream slides over the WebSocket as <code>slides_response</code> events.</p>
+
+      <div class="grid gap-4 lg:grid-cols-2">
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">Slides</h3>
+          <ul>
+            <li><code>slides_generate_or_update</code> — create/update a deck (title/summary or Editor.js blocks). Enforces ~4–6 total slides.</li>
+            <li><code>slides_fetch_latest</code> — fetch latest deck for the session.</li>
+            <li><code>slides_list_versions</code> — list recent versions with titles/timestamps.</li>
+            <li><code>slides_diff_latest</code> — summarize differences vs previous (or specific) version.</li>
+            <li><code>slides_revert</code> — revert to a prior version.</li>
+          </ul>
+          <p class="text-xs text-slate-500">Slides are stored per session with versioning; updates emit <code>slides_response</code> then <code>slides_done</code>.</p>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 class="m-0">Documents (Knowledge)</h3>
+          <ul>
+            <li><code>documents_list</code> — list uploaded documents for agent/user.</li>
+            <li><code>documents_fetch</code> — fetch closest matches by title/file/keywords (optionally with truncated content).</li>
+            <li><code>documents_analyze</code> — answer questions using selected documents (can also create slides).</li>
+            <li><code>documents_generate_slides</code> — build slides from selected document(s).</li>
+          </ul>
+          <p class="text-xs text-slate-500">Supported uploads: DOC, TXT, Excel, CSV, PDF. Content is extracted, scrubbed, and indexed.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Auth & Security -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Auth & Security Notes</h2>
+      <ul>
+        <li>Provide API Key via header, query, or cookie. Keys are tenant-scoped.</li>
+        <li>Calls must originate from an allow-listed Origin/Host/IP set in the <strong>ApiAuth</strong> record.</li>
+        <li>WS connection requires a valid <strong>bot_id</strong> and a session <strong>thread_id</strong> belonging to that agent; otherwise close code <code>4005</code>.</li>
+      </ul>
+    </section>
+
+    <!-- Environment -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Runtime & Environment</h2>
+      <ul>
+        <li><strong>STT</strong>: Whisper via <span class="font-mono">OPENAI_STT_MODEL</span> (default <span class="font-mono">whisper-1</span>).</li>
+        <li><strong>TTS</strong> services: <span class="font-mono">gtts</span>, <span class="font-mono">elevenlabs</span>, <span class="font-mono">openai</span>.
+          <span class="font-mono">voice_id</span> may include the service prefix (e.g., <code>openai::alloy</code>).</li>
+        <li><strong>Visemes</strong>: ARKit-15 frames, dense timeline with <code>viseme_times</code>, <code>frame_ms</code>, <code>duration_ms</code>.</li>
+      </ul>
+    </section>
+
+    <!-- Data Model Snapshot -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Data Model (high level)</h2>
+      <ul>
+        <li><strong>User</strong> — email-based auth; owns ApiAuth keys.</li>
+        <li><strong>ApiAuth</strong> — API key + allow-listed origins/hosts/IPs.</li>
+        <li><strong>Voice</strong> — TTS configuration (service, voice_id, gender, preview).</li>
+        <li><strong>Agent</strong> — belongs to a User, references a Voice; exposes <strong>bot_id</strong>.</li>
+        <li><strong>Session</strong> — (User, Agent) pair; exposes <strong>thread_id</strong>.</li>
+        <li><strong>Chat</strong> — messages & final reply text; emotion, viseme, timings/meta.</li>
+        <li><strong>Slides</strong> — Editor.js deck with versioned revisions.</li>
+        <li><strong>Knowledge</strong> — uploaded files (title, file_name, MIME, excerpt, index status/meta).</li>
+      </ul>
+    </section>
+
+    <!-- Error codes -->
+    <section class="prose prose-slate max-w-none mt-10">
+      <h2>Common Errors</h2>
+      <ul>
+        <li><strong>401/403</strong>: missing/invalid API key or origin not allowed.</li>
+        <li><strong>404</strong>: agent/session/file not found for tenant scope.</li>
+        <li><strong>4005 (WS)</strong>: invalid <code>thread_id</code> pattern or session not found for the agent.</li>
+        <li><strong>Rate/size</strong>: inbound >20 Hz or audio &gt;25 MiB ignored/rejected.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+    // Highlight.js
+    window.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    });
+  </script>
+</body>
+</html>

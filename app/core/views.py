@@ -2,9 +2,8 @@
 from __future__ import annotations
 from django.shortcuts import render
 
-def apiDoc(request):
+def home(request):
     """
-    Public api doc page for REST APIs and WebSocket.
-    Pulls no dynamic data; safe for DEBUG.
+    Public home page for Demo.
     """
-    return render(request, "api_doc.html", {})
+    return render(request, "index.html", {})

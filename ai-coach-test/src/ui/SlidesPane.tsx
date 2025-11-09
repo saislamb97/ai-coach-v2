@@ -1,4 +1,5 @@
 import React from 'react'
+import type { ToolConstructable } from '@editorjs/editorjs'
 import EditorJS from '@editorjs/editorjs'
 import type { OutputData } from '@editorjs/editorjs'
 import Header from '@editorjs/header'
@@ -83,9 +84,16 @@ export default function SlidesPane({ className='', incoming, streaming=false }: 
       data: ejData,
       minHeight: 0,
       tools: {
-        header: { class: Header, inlineToolbar: true, config: { levels:[2,3], defaultLevel:2 }},
-        list: { class: List, inlineToolbar: true },
-        paragraph: { class: Paragraph, inlineToolbar: true },
+        header: {
+          class: Header as unknown as ToolConstructable,
+          inlineToolbar: true,
+          config: { levels: [2, 3], defaultLevel: 2 },
+        },
+        list: { class: List as unknown as ToolConstructable, inlineToolbar: true },
+        paragraph: {
+          class: Paragraph as unknown as ToolConstructable,
+          inlineToolbar: true,
+        },
       },
       onChange: async () => {
         if (!mounted || !ej.current) return

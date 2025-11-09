@@ -261,6 +261,13 @@ class KnowledgeViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelV
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
 
+def docView(request):
+    """
+    Public api doc page for REST APIs and WebSocket.
+    Pulls no dynamic data; safe for DEBUG.
+    """
+    return render(request, "doc.html", {})
+
 
 # ------------------- Simple dev test endpoint -------------------
 def testView(request):

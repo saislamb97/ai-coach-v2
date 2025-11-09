@@ -109,5 +109,9 @@ export function openWS(h: WSHandlers) {
     tryNext();
   })();
 
-  return active as WebSocket;
+  if (!active) {
+    console.warn("⚠️ WebSocket not connected yet");
+    return null;
+  }
+  return active;
 }

@@ -533,7 +533,7 @@ export default function ChatPane({
 
         {/* mic (PTT) */}
         {/** If micSupported is false, show enable button; else show hold-to-talk */}
-        {usePTT ? (
+        {micSupported !== undefined ? (
           micSupported ? (
             <button
               disabled={!connected}

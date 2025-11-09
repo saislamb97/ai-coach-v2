@@ -1,9 +1,9 @@
 # core/urls.py
 from django.urls import path
-from core.views import apiDoc
+from core.views import home
 
 app_name = "core"
 
 urlpatterns = [
-    path("", apiDoc, name="api-doc"),
+    path("", home, name="home"),
 ]

@@ -115,7 +115,7 @@ export default function AvatarCanvas({
     camera: THREE.PerspectiveCamera
     renderer: THREE.WebGLRenderer
     controls: OrbitControls
-  }>()
+  } | null>(null)
   const arkitTargets = React.useRef<Array<{
     influences: number[]
     controlled: number[]
@@ -215,13 +215,19 @@ export default function AvatarCanvas({
         console.warn('[AvatarCanvas] framing error', e)
       }
     }, undefined, (err) => {
-      console.error('[AvatarCanvas] GLB load error:', err?.message || err)
+      console.error('[AvatarCanvas] GLB load error:',
+        err instanceof Error ? err.message : String(err)
+      )
     })
 
     // render loop
     let raf = 0
     const loop = () => {
-      raf = renderer.setAnimationLoop ? 0 : requestAnimationFrame(loop)
+      if (typeof renderer.setAnimationLoop === 'function') {
+        renderer.setAnimationLoop(loop)
+      } else {
+        raf = requestAnimationFrame(loop)
+      }
       controls.update()
 
       const f = getVisemeFrame()
@@ -277,7 +283,7 @@ export default function AvatarCanvas({
         })
         three.current?.renderer.dispose()
       } catch {}
-      three.current = undefined
+      three.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [glbUrl, getVisemeFrame, zoom])
