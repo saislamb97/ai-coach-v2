@@ -1,0 +1,15 @@
+/* custom_admin.css */
+body.login {
+    background: linear-gradient(135deg, #4e73df, #1cc88a);
+}
+.login-box {
+    border-radius: 15px;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+}
+.login-logo img {
+    width: 150px;
+    margin-bottom: 20px;
+}
+.login .card {
+    background-color: rgba(255, 255, 255, 0.95);
+}

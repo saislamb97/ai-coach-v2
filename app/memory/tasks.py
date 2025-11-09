@@ -18,7 +18,7 @@ def index_knowledge(knowledge_id: int) -> dict:
 
     # extra scrub before partial update
     obj.title = _strip_ctrl(obj.title or "")
-    obj.original_name = _strip_ctrl(obj.original_name or "")
+    obj.file_name = _strip_ctrl(obj.file_name or "")
     obj.mimetype = _strip_ctrl(obj.mimetype or "")
     obj.ext = _strip_ctrl(obj.ext or "")
     obj.excerpt = _strip_ctrl(obj.excerpt or "")
@@ -27,6 +27,7 @@ def index_knowledge(knowledge_id: int) -> dict:
 
     with transaction.atomic():
         obj.save(update_fields=[
+            "file_name",
             "size_bytes","mimetype","sha256","ext",
             "pages","rows","cols","excerpt","meta",
             "index_status","index_meta","normalized_name","search_terms","updated_at"

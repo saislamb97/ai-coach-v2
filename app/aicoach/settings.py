@@ -56,10 +56,8 @@ CACHE_TTL = env_int("CACHE_TTL", 600)
 # Installed apps
 # =============================================================================
 INSTALLED_APPS = [
-    # ASGI / server
     "daphne",
-    # Django admin Theme
-    'simpleui',
+    "jazzmin",
 
     # Django core
     "django.contrib.admin",
@@ -249,11 +247,11 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "aicoach API",
-    "DESCRIPTION": "Welcome to aicoach Agent Portal.",
+    "TITLE": "AI Coach API",
+    "DESCRIPTION": "Welcome to AI Coach Agent Portal.",
     "VERSION": "1.0.0",
     "SCHEMA_PATH_PREFIX": r"/api/",
-    "CONTACT": {"name": "aicoach AI Agent Team", "email": "support@nudgyt.com", "url": "https://aicoach.nudgyt.com"},
+    "CONTACT": {"name": "AI Coach AI Agent Team", "email": "support@nudgyt.com", "url": "https://aicoach.nudgyt.com"},
     "SECURITY_SCHEMES": {
         "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Format: `Api-Key <key>`"}
     },
@@ -308,64 +306,56 @@ DATA_UPLOAD_MAX_NUMBER_FILES = 150
 # =============================================================================
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# === SimpleUI Settings for aicoach ===
 
-# Theme and branding
-SIMPLEUI_DEFAULT_THEME = 'admin.lte.css'
-SIMPLEUI_HOME_TITLE = 'aicoach AI System'
-SIMPLEUI_LOGO = '/static/logo.png'
-SIMPLEUI_FAVICON = '/static/favicon.ico'
-SIMPLEUI_HOME_ICON = 'fa fa-home'
+# ------------------------------------------------------------------------------
+# JAZZMIN CONFIGURATION
+# ------------------------------------------------------------------------------
+JAZZMIN_SETTINGS = {
+    # Site Title, Header, and Branding
+    "site_title": "AI Coach Admin",
+    "site_header": "AI Coach",
+    "site_brand": "AI Coach",
 
-# Home page modules
-SIMPLEUI_HOME_INFO = False
-SIMPLEUI_HOME_QUICK = True
-SIMPLEUI_HOME_ACTION = True
+    # Logos (make sure these exist in your static files)
+    "site_logo": "logo.png",
+    "login_logo": "logo.png",
+    "login_logo_dark": "logo.png",
+    "site_logo_classes": "img-circle",  # Use rounded logo if you prefer
 
-# Offline mode & analytics
-SIMPLEUI_STATIC_OFFLINE = True
-SIMPLEUI_ANALYSIS = True
-SIMPLEUI_DEFAULT_ICON = True
-SIMPLEUI_LOADING = True
+    # Favicon
+    "site_icon": "favicon.ico",
 
-# Optional: keep Django’s system apps in the menu
-SIMPLEUI_CONFIG = {
-    'system_keep': True,
+    # Welcome Sign and Copyright
+    "welcome_sign": "Welcome to AI Coach Admin Portal",
+    "copyright": "nudgyt.com",
 
-    # === Custom Menu Layout ===
-    'menus': [
-        {
-            'name': 'API',
-            'icon': 'fas fa-plug',
-            'models': [
-                {
-                    'name': 'Swagger UI',
-                    'icon': 'fa fa-link',
-                    'url': '/api/schema/swagger-ui/',
-                    'newTab': True
-                },
-                {
-                    'name': 'ReDoc',
-                    'icon': 'fa fa-book',
-                    'url': '/api/schema/redoc/',
-                    'newTab': True
-                },
-                {
-                    'name': 'Raw Schema',
-                    'icon': 'fa fa-code',
-                    'url': '/api/schema/',
-                    'newTab': True
-                },
-                {
-                    'name': 'Test Console',
-                    'icon': 'fa fa-vial',
-                    'url': '/api/test/',
-                    'newTab': True
-                }
-            ]
-        }
-    ]
+    # User avatar field (if used in the admin)
+    "user_avatar": "profile",
+
+    # Top Menu Links (for quick navigation)
+    "topmenu_links": [
+        {"name": "Home", "url": "core:api-doc", "new_window": True},
+        {"name": "API", "url": "swagger-ui", "new_window": True},
+        {"name": "Test", "url": "api:test", "new_window": True},
+    ],
+
+    # UI Tweaks for Jazzmin
+    "custom_css": "admin.css",  # Add your custom CSS here (create this file in your static/css folder)
+    "custom_js": "admin.js",       # Add your custom JS if needed
+
+    # Layout tweaks for the login page
+    "site_user_avatar": "img-circle",  # for example, or remove if not needed
+
+    # Optional: Adjust login form container width
+    "login_form_class": "bg-white p-8 rounded-xl shadow-lg",  # additional classes for the login form
+    # You can also customize the "welcome_sign" and other text
+
+    # Dark Mode Options: Jazzmin can automatically switch based on OS theme
+    "dark_mode_theme": "darkly",  # or any available theme (see Jazzmin docs)
+
+    # Additional settings for the login page if required...
 }
+
 
 # =============================================================================
 # Temp / Logs

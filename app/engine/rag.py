@@ -25,7 +25,7 @@ class Rag:
         queue: Optional[asyncio.Queue] = None,
         limits=None,
         model: Optional[str] = None,
-        temperature: float = 0.3,  # kept for parity; nodes controls its own temps
+        temperature: float = 0.3,
     ):
         self.queue = queue
         self.limits = limits
@@ -57,6 +57,5 @@ class Rag:
         return {"response": state.get("response", ""), "timings": state["timings"]}
 
     async def cancel(self):
-        # Provided for API symmetry; no mid-run cancellation in this agent.
         log.debug("[rag] cancel (noop)")
         return

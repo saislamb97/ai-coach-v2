@@ -6,6 +6,7 @@ import json
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
+from django.core.files.base import ContentFile
 
 from agent.models import Voice, Agent
 from memory.models import Session, Chat, Slides, Knowledge
@@ -280,10 +281,10 @@ class KnowledgeReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Knowledge
         fields = [
-            "id", "asset_key",
+            "id", "key",
             "user", "user_username",
             "agent", "bot_id", "agent_name",
-            "title", "original_name",
+            "title", "file_name",
             "file", "file_url",
             "size_bytes", "mimetype", "sha256", "ext",
             "pages", "rows", "cols",
@@ -301,40 +302,83 @@ class KnowledgeReadSerializer(serializers.ModelSerializer):
 
 
 class KnowledgeWriteSerializer(serializers.ModelSerializer):
-    # REQUESTS accept bot_id (not agent). 'file' is required on create.
+    """
+    Create/update using only:
+      - bot_id (agent lookup; user taken from agent.user)
+      - name   (original client filename including extension)
+      - file_b64 (base64 payload; data URI accepted)
+    """
     bot_id = serializers.UUIDField(write_only=True, required=True)
+    name = serializers.CharField(write_only=True, required=True, max_length=255)
+    file_b64 = serializers.CharField(write_only=True, required=True)
 
     class Meta:
         model = Knowledge
-        fields = [
-            "bot_id",
-            "title",
-            "file",
-        ]
-        extra_kwargs = {
-            "title": {"required": False},
-            "file": {"required": True},
-        }
+        fields = ["bot_id", "name", "file_b64"]
+
+    # ---- helpers ----
+    def _decode_b64(self, b64: str) -> bytes:
+        import base64
+        s = (b64 or "").strip()
+        # support data: URIs (e.g., data:application/pdf;base64,AAA...)
+        if "," in s and s.lower().startswith("data:"):
+            s = s.split(",", 1)[1]
+        try:
+            return base64.b64decode(s, validate=True)
+        except Exception:
+            raise serializers.ValidationError("file_b64 must be valid base64 (data URI supported).")
+
+    def validate_name(self, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise serializers.ValidationError("name is required.")
+        if "." not in v or v.startswith("."):
+            raise serializers.ValidationError("name must include a valid extension (e.g., report.pdf).")
+        if len(v) > 255:
+            raise serializers.ValidationError("name is too long.")
+        return v
 
     def create(self, validated):
         bot_id = validated.pop("bot_id")
-        agent = Agent.objects.get(bot_id=bot_id)
-        # original_name from uploaded file name
-        f = validated.get("file")
-        original_name = getattr(f, "name", "file")
-        return Knowledge.objects.create(agent=agent, original_name=original_name, **validated)
+        name = validated.pop("name")
+        file_b64 = validated.pop("file_b64")
+
+        agent = Agent.objects.select_related("user").get(bot_id=bot_id)
+        if not agent.user_id:
+            raise serializers.ValidationError("Agent is not linked to a user.")
+
+        raw = self._decode_b64(file_b64)
+        if not raw:
+            raise serializers.ValidationError("file_b64 decoded to empty content.")
+
+        # Build ContentFile with the client-provided name (upload_to will record it as file_name)
+        content = ContentFile(raw, name=name)
+
+        obj = Knowledge.objects.create(
+            agent=agent,
+            user=agent.user,      # user collected from agent.user
+            file=content,
+            # title is optional; omit to keep default ""
+        )
+        return obj
 
     def update(self, instance: Knowledge, validated):
-        # Allow switching agent via bot_id if provided (rare)
+        """
+        Optional: support re-upload using same input shape.
+        """
         bot_id = validated.pop("bot_id", None)
-        if bot_id:
-            instance.agent = Agent.objects.get(bot_id=bot_id)
+        name = validated.pop("name", None)
+        file_b64 = validated.pop("file_b64", None)
 
-        for f in ("title", "file"):
-            if f in validated:
-                setattr(instance, f, validated[f])
-        # Keep original_name in sync if file changed
-        if "file" in validated:
-            instance.original_name = getattr(instance.file, "name", instance.original_name)
+        if bot_id:
+            agent = Agent.objects.select_related("user").get(bot_id=bot_id)
+            instance.agent = agent
+            instance.user = agent.user
+
+        if file_b64 and name:
+            raw = self._decode_b64(file_b64)
+            content = ContentFile(raw, name=name)
+            instance.file = content  # model hooks will reset index and capture file_name
+
         instance.save()
         return instance

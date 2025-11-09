@@ -1,4 +1,6 @@
+# app/api/views.py
 from __future__ import annotations
+
 from django.shortcuts import render
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -24,6 +26,7 @@ from api.serializers import (
     SlidesReadSerializer, SlidesWriteSerializer,
     KnowledgeReadSerializer, KnowledgeWriteSerializer,
 )
+
 
 # ---------- Helper mixin: always return READ serializer on writes ----------
 class ReturnReadOnWriteMixin:
@@ -69,7 +72,12 @@ class ReturnReadOnWriteMixin:
 
 # ------------------- Swagger shared params -------------------
 USER_SCOPE_PARAMS = [
-    OpenApiParameter(name="user_id", location=OpenApiParameter.QUERY, required=False, description="Admin-only: scope to user id"),
+    OpenApiParameter(
+        name="user_id",
+        location=OpenApiParameter.QUERY,
+        required=False,
+        description="Admin-only: scope to user id",
+    ),
 ]
 
 
@@ -220,9 +228,21 @@ class SlidesViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelView
 @extend_schema_view(
     list=extend_schema(summary="List knowledge files (filterable by bot_id/title/mimetype)", parameters=USER_SCOPE_PARAMS),
     retrieve=extend_schema(summary="Retrieve a knowledge item"),
-    create=extend_schema(summary="Upload knowledge (send bot_id, not agent)"),
-    update=extend_schema(summary="Update knowledge metadata"),
-    partial_update=extend_schema(summary="Partially update knowledge metadata"),
+    create=extend_schema(
+        summary="Upload knowledge (JSON: bot_id, name, file_b64)",
+        description=(
+            "Pass a JSON body: {bot_id: UUID, name: string (optional title), file_b64: base64-encoded file}. "
+            "The owning user is inferred from the Agent (bot_id)."
+        ),
+    ),
+    update=extend_schema(
+        summary="Update knowledge (optionally re-upload)",
+        description=(
+            "You may resend file_b64 to replace the file. If bot_id is provided, the agent may be switched; "
+            "the user is still inferred from the new agent."
+        ),
+    ),
+    partial_update=extend_schema(summary="Partially update knowledge"),
     destroy=extend_schema(summary="Delete knowledge"),
 )
 @extend_schema(tags=["Knowledge"])
@@ -231,7 +251,7 @@ class KnowledgeViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelV
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
     filterset_class = KnowledgeFilter
-    search_fields = ["title", "original_name", "mimetype", "agent__name", "agent__bot_id", "sha256"]
+    search_fields = ["title", "file_name", "mimetype", "agent__name", "agent__bot_id", "sha256"]
     ordering_fields = ["created_at", "updated_at", "index_status", "mimetype", "size_bytes"]
     user_lookup_field = "user"
 
@@ -240,13 +260,6 @@ class KnowledgeViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelV
 
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
-
-    def perform_create(self, serializer):
-        # Ensure user is attached from API key; agent resolved from bot_id in serializer
-        user = self._resolve_auth_user()
-        if not user:
-            raise ValidationError("API key is not linked to a valid user.")
-        serializer.save(user=user)
 
 
 # ------------------- Simple dev test endpoint -------------------

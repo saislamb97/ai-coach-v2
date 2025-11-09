@@ -1,4 +1,4 @@
-# app/memory/signals.py
+# app/memory/signals.py (unchanged logic; shown for clarity)
 from __future__ import annotations
 import logging
 
@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 def enqueue_index_on_upload(sender, instance: Knowledge, created: bool, **kwargs):
     """
     Enqueue background extraction/indexing when a Knowledge row is created
-    or explicitly marked UNINDEXED again. Use on_commit to avoid race conditions.
+    or explicitly marked UNINDEXED again (e.g., file replaced).
     """
     try:
         should_enqueue = created or instance.index_status == Knowledge.IndexStatus.UNINDEXED
@@ -31,10 +31,5 @@ def enqueue_index_on_upload(sender, instance: Knowledge, created: bool, **kwargs
             index_knowledge.delay(instance.id)
 
         transaction.on_commit(_enqueue)
-
     except Exception:
-        log.exception(
-            "knowledge.enqueue: failed for id=%s key=%s",
-            getattr(instance, "id", None),
-            getattr(instance, "key", None),
-        )
+        log.exception("knowledge.enqueue: failed for id=%s key=%s", getattr(instance, "id", None), getattr(instance, "key", None))

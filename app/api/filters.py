@@ -58,8 +58,8 @@ class KnowledgeFilter(df.FilterSet):
     mimetype = df.CharFilter()
     index_status = df.CharFilter()
     title = df.CharFilter(lookup_expr="icontains")
-    original_name = df.CharFilter(lookup_expr="icontains")
+    file_name = df.CharFilter(lookup_expr="icontains")
 
     class Meta:
         model = Knowledge
-        fields = ["bot_id", "mimetype", "index_status", "title", "original_name"]
+        fields = ["bot_id", "mimetype", "index_status", "title", "file_name"]

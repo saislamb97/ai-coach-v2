@@ -8,11 +8,14 @@ import uuid
 from typing import List, Set, Tuple
 
 from django.core.files.storage import default_storage
+from django.core.validators import FileExtensionValidator
 from django.db import models
 from django.utils import timezone
 
 from agent.models import Agent
 from user.models import User
+
+from memory.extract import SUPPORTED_EXTS
 
 import logging
 logger = logging.getLogger(__name__)
@@ -182,6 +185,16 @@ class SlidesRevision(TimeStampedModel):
 # Knowledge (uploads per agent)
 # -----------------------------
 def knowledge_upload_to(instance: "Knowledge", filename: str) -> str:
+    """
+    Build storage path AND remember the client-supplied filename on the instance,
+    so we never rely on admin input for file_name.
+    """
+    # Remember client name for later persistence
+    try:
+        instance._uploaded_client_name = os.path.basename(filename or "").strip() or "file"
+    except Exception:
+        instance._uploaded_client_name = "file"
+
     agent_slug = _slugify(getattr(instance.agent, "name", "") or "agent")
     stem, ext = os.path.splitext(os.path.basename(filename or "file"))
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", (stem or "file")).strip("._")
@@ -196,8 +209,12 @@ class Knowledge(TenantModel, TimeStampedModel):
     key = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
 
     title = models.CharField(max_length=255, blank=True, default="", help_text="Optional human-readable title.")
-    original_name = models.CharField(max_length=255, help_text="Original filename at upload time.")
-    file = models.FileField(upload_to=knowledge_upload_to, max_length=500)
+    file_name = models.CharField(max_length=255, blank=True, editable=False)
+    file = models.FileField(
+        upload_to=knowledge_upload_to,
+        max_length=500,
+        validators=[FileExtensionValidator(allowed_extensions=[e.lstrip(".") for e in sorted(SUPPORTED_EXTS)])],
+    )
 
     size_bytes = models.BigIntegerField(default=0)
     mimetype = models.CharField(max_length=100, blank=True, default="")
@@ -236,7 +253,7 @@ class Knowledge(TenantModel, TimeStampedModel):
 
     @property
     def display_name(self) -> str:
-        return (self.title or "").strip() or (self.original_name or "").strip() or self.file.name
+        return (self.title or "").strip() or (self.file_name or "").strip() or self.file.name
 
     @staticmethod
     def _tokenize(s: str) -> List[str]:
@@ -253,7 +270,7 @@ class Knowledge(TenantModel, TimeStampedModel):
         return {low, slug, dotless.lower(), _slugify(dotless)}
 
     def refresh_search_terms(self) -> None:
-        base_names = {self.title or "", self.original_name or "", os.path.basename(self.file.name or "")}
+        base_names = {self.title or "", self.file_name or "", os.path.basename(self.file.name or "")}
         variants: Set[str] = set()
         for n in base_names:
             variants |= self._variants(n)
@@ -261,15 +278,28 @@ class Knowledge(TenantModel, TimeStampedModel):
         self.normalized_name = _slugify(self.display_name)[:300]
         self.search_terms = sorted({v for v in variants if v})[:80]
 
-    # Extraction / indexing
+    # ---------- helpers ----------
+    def _mark_unindexed_due_to_new_file(self):
+        """Reset indexing fields when file is swapped/re-uploaded."""
+        self.index_status = self.IndexStatus.UNINDEXED
+        self.sha256 = ""
+        self.mimetype = ""
+        self.ext = ""
+        self.pages = None
+        self.rows = None
+        self.cols = None
+        self.excerpt = ""
+        self.meta = {}
+        self.index_meta = {}
+
+    # ---------- Extraction / indexing ----------
     def extract_and_index(self) -> None:
         """
-        Compute sha256/size/mime and extract text via memory.extract.extract_text.
-        Uses a temp file so this works regardless of storage backend.
+        Compute sha256/size/mime and extract rich content via memory.extract.extract_rich.
         Always scrubs control chars to avoid DB NUL errors.
         """
         from tempfile import NamedTemporaryFile
-        from memory.extract import extract_text, detect_mime  # ← your extractor API
+        from memory.extract import extract_rich, detect_mime  # ← rich extractor
 
         storage_path = self.file.name
         try:
@@ -281,11 +311,16 @@ class Knowledge(TenantModel, TimeStampedModel):
             return
 
         self.size_bytes = len(blob)
-        self.ext = _ext_of(self.original_name or storage_path)
+
+        # Use the captured client file name; fall back to storage basename
+        if not self.file_name:
+            self.file_name = getattr(self, "_uploaded_client_name", "") or os.path.basename(storage_path)
+
+        self.ext = _ext_of(self.file_name or storage_path)
 
         tmp_path = None
         try:
-            # Materialize to a real temp path (needed for libmagic, PyMuPDF, CLIs)
+            # Materialize to temp path for libraries/CLIs that need it
             with NamedTemporaryFile(delete=False, suffix=self.ext or ".bin") as tmp:
                 tmp.write(blob)
                 tmp_path = tmp.name
@@ -295,19 +330,67 @@ class Knowledge(TenantModel, TimeStampedModel):
                     self.mimetype = detect_mime(tmp_path)
                 except Exception:
                     import mimetypes
-                    self.mimetype = mimetypes.guess_type(self.original_name or storage_path)[0] or ""
+                    self.mimetype = mimetypes.guess_type(self.file_name or storage_path)[0] or ""
 
             self.sha256 = hashlib.sha256(blob).hexdigest()
 
-            # Extract
-            text = extract_text(tmp_path, mime=self.mimetype or None)
+            # ---- rich extraction ----
+            result = extract_rich(tmp_path)  # ExtractionResult
+            text = result.text or ""
+
+            # excerpt
             self.excerpt = _strip_ctrl(text)[:4000]
-            # Optional: set pages/rows/cols if you later parse such info
-            self.meta = _clean_json({"mime": self.mimetype, "ext": self.ext})
+
+            # pages/rows/cols mapping from structure
+            pages = rows = cols = None
+            kind = (result.structure or {}).get("kind")
+            if kind == "pdf":
+                pages = (result.structure or {}).get("page_count")
+            elif kind == "csv":
+                rows = (result.structure or {}).get("rows")
+                cols = (result.structure or {}).get("cols")
+            elif kind == "excel":
+                sheets = (result.structure or {}).get("sheets", []) or []
+                rows = sum(int(s.get("rows", 0) or 0) for s in sheets) if sheets else None
+                try:
+                    cols = max(int(s.get("cols", 0) or 0) for s in sheets) if sheets else None
+                except ValueError:
+                    cols = None
+            elif kind == "json":
+                shape = (result.structure or {}).get("shape") or {}
+                if shape.get("type") == "array":
+                    rows = shape.get("length")
+                if "columns" in shape:
+                    try:
+                        cols = len(shape.get("columns") or [])
+                    except Exception:
+                        cols = None
+            # docx kind could map paragraphs/tables via meta only; leave pages/rows/cols as None
+
+            self.pages = pages
+            self.rows = rows
+            self.cols = cols
+
+            # meta: store everything useful (safe JSON)
+            self.meta = _clean_json({
+                "mime": result.mime or self.mimetype,
+                "ext": result.ext or self.ext,
+                "encoding": result.encoding,
+                "stats": {
+                    "size_bytes": result.stats.size_bytes,
+                    "num_chars": result.stats.num_chars,
+                    "num_words": result.stats.num_words,
+                    "num_lines": result.stats.num_lines,
+                },
+                "structure": result.structure or {},
+                "file_name": self.file_name,
+            })
+
             self.index_status = self.IndexStatus.INDEXED
             self.index_meta = _clean_json({"ok": True})
 
         except Exception as e:
+            # Best-effort fallback (preview)
             try:
                 preview = blob[:4000]
                 try:
@@ -316,8 +399,8 @@ class Knowledge(TenantModel, TimeStampedModel):
                     txt = preview.decode("latin-1", errors="replace")
                 self.excerpt = _strip_ctrl(txt)
                 self.meta = _clean_json({"mime": self.mimetype, "ext": self.ext, "fallback": True})
-                self.index_status = self.IndexStatus.INDEXED
-                self.index_meta = _clean_json({"fallback": True, "error": str(e)})
+                self.index_status = self.IndexStatus.FAILED  # mark failed (extraction didn’t complete)
+                self.index_meta = _clean_json({"error": str(e)})
             except Exception as e2:
                 self.index_status = self.IndexStatus.FAILED
                 self.index_meta = _clean_json({"error": f"extract_failed:{e2!s}"})
@@ -328,15 +411,34 @@ class Knowledge(TenantModel, TimeStampedModel):
                 except Exception:
                     pass
 
-    # Save hook
+    # Save hook: capture client name, detect file changes, and scrub fields.
     def save(self, *args, **kwargs):
+        # Detect file change by comparing current DB value
+        file_changed = False
+        if self.pk:
+            try:
+                old = Knowledge.objects.only("file", "size_bytes", "sha256").get(pk=self.pk)
+                file_changed = bool(old.file.name != getattr(self.file, "name", old.file.name))
+            except Knowledge.DoesNotExist:
+                file_changed = True
+        else:
+            file_changed = True  # new row
+
+        # If file changed, auto-fill file_name from upload hook (or storage basename)
+        if file_changed:
+            if not self.file_name:
+                self.file_name = getattr(self, "_uploaded_client_name", "") or os.path.basename(getattr(self.file, "name", "") or "")
+            self._mark_unindexed_due_to_new_file()
+
         self.refresh_search_terms()
-        # scrub all text/JSON fields
+
+        # scrub
         self.title = _strip_ctrl(self.title or "")
-        self.original_name = _strip_ctrl(self.original_name or "")
+        self.file_name = _strip_ctrl(self.file_name or "")
         self.mimetype = _strip_ctrl(self.mimetype or "")
         self.ext = _strip_ctrl(self.ext or "")
         self.excerpt = _strip_ctrl(self.excerpt or "")
         self.meta = _clean_json(self.meta or {})
         self.index_meta = _clean_json(self.index_meta or {})
+
         super().save(*args, **kwargs)

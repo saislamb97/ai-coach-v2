@@ -1,10 +1,15 @@
+# app/memory/admin.py
 from __future__ import annotations
 
+import os
 import json
-from django.contrib import admin
+
+from django import forms
+from django.contrib import admin, messages
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 
+from memory.extract import SUPPORTED_EXTS  # single source of truth for allowed extensions
 from .models import (
     Session, Chat,
     Slides, SlidesRevision,
@@ -135,18 +140,28 @@ class ChatAdmin(PrettyMixin, admin.ModelAdmin):
 # Slides + Revisions
 # ==========================================================
 class SlidesRevisionInline(PrettyMixin, admin.StackedInline):
-    """Read-only inline showing the latest 3 snapshots for quick eye-balling."""
     model = SlidesRevision
     extra = 0
     can_delete = False
+    show_change_link = True
     verbose_name = "Recent revision"
     verbose_name_plural = "Recent revisions (latest 3)"
     fields = ("version", "updated_by", "created_at", "title", "summary", "editorjs_pretty")
     readonly_fields = fields
+    max_num = 0  # no adding through inline; read-only snapshots
 
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        return qs.order_by("-version")[:3]
+    # IMPORTANT: do NOT override get_queryset() here with slicing.
+    # Instead, limit inside the formset AFTER Django filters by FK.
+
+    def get_formset(self, request, obj=None, **kwargs):
+        FormSet = super().get_formset(request, obj, **kwargs)
+
+        class LatestThreeFormSet(FormSet):
+            def get_queryset(self):
+                qs = super().get_queryset().order_by("-version")
+                return qs[:3]  # slicing is safe here
+
+        return LatestThreeFormSet
 
     @admin.display(description="editor.js (pretty)")
     def editorjs_pretty(self, obj: SlidesRevision):
@@ -280,8 +295,36 @@ class SlidesRevisionAdmin(PrettyMixin, admin.ModelAdmin):
 # ==========================================================
 # Knowledge
 # ==========================================================
+
+# ---- Single-file form (create/edit). Enforce extensions & add <input accept="...">.
+class KnowledgeAdminForm(forms.ModelForm):
+    class Meta:
+        model = Knowledge
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        accept_attr = ",".join(sorted(SUPPORTED_EXTS))  # ".csv,.doc,.docx,..."
+        if "file" in self.fields:
+            self.fields["file"].widget.attrs.update({"accept": accept_attr})
+
+    def clean_file(self):
+        f = self.cleaned_data.get("file")
+        if not f:
+            return f
+        ext = os.path.splitext(f.name)[1].lower()
+        if ext not in SUPPORTED_EXTS:
+            raise forms.ValidationError(
+                f"Unsupported file type: {ext or 'unknown'}. "
+                f"Allowed: {', '.join(sorted(SUPPORTED_EXTS))}"
+            )
+        return f
+
+
 @admin.register(Knowledge)
 class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
+    form = KnowledgeAdminForm
+
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
     list_select_related = ("user", "agent")
@@ -293,11 +336,12 @@ class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
         "index_status", "created_at",
     )
     list_filter = ("agent", "user", "index_status", "mimetype", "created_at")
-    search_fields = ("original_name", "title", "key", "normalized_name", "search_terms")
+    search_fields = ("file_name", "title", "key", "normalized_name", "search_terms")
 
     readonly_fields = (
         "created_at", "updated_at",
         "file_link",
+        "file_name",
         "mimetype", "size_bytes", "sha256", "ext",
         "pages", "rows", "cols",
         "excerpt_preview", "meta_pretty", "index_meta_pretty",
@@ -306,7 +350,7 @@ class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
 
     fields = (
         ("user", "agent"),
-        ("title", "original_name"),
+        ("title", "file_name"),  # file_name is readonly, auto-derived on save
         "file",
         ("mimetype", "ext", "size_bytes"),
         ("pages", "rows", "cols"),
@@ -353,20 +397,21 @@ class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
 
     @admin.action(description="Extract & index selected")
     def action_extract_and_index(self, request, queryset):
-        # optional admin reindex; Celery already does this on create
+        # optional admin reindex; Celery already does this on create/change
         ok = 0
         for asset in queryset:
             try:
                 asset.extract_and_index()
                 asset.refresh_search_terms()
                 asset.save(update_fields=[
-                    "size_bytes","mimetype","sha256","ext",
-                    "pages","rows","cols","excerpt","meta",
-                    "index_status","index_meta","normalized_name","search_terms","updated_at"
+                    "file_name",
+                    "size_bytes", "mimetype", "sha256", "ext",
+                    "pages", "rows", "cols", "excerpt", "meta",
+                    "index_status", "index_meta", "normalized_name", "search_terms", "updated_at"
                 ])
                 ok += 1
-            except Exception:
-                pass
+            except Exception as e:
+                self.message_user(request, f"Failed to reindex {asset.id}: {e}", level=messages.ERROR)
         self.message_user(request, f"Processed {ok} item(s).")
 
     @admin.action(description="Mark as unindexed")

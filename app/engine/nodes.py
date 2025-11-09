@@ -1,3 +1,4 @@
+# nodes.py
 from __future__ import annotations
 
 import asyncio
@@ -23,9 +24,6 @@ from .utils import (
     extract_sentences,
     build_text_system_prompt,
     build_router_system_prompt,
-    build_slides_context,
-    build_knowledge_answer_context,
-    build_knowledge_list_context,   # NEW
     elapsed_ms,
 )
 
@@ -73,9 +71,7 @@ class QAState(TypedDict, total=False):
     slides_latest: Dict[str, Any]
     slides_tool_used: bool
 
-    # Knowledge
-    knowledge_result: Dict[str, Any]
-    knowledge_tool_used: bool
+    tool_summaries: List[str]
 
     response: str
     emotion_final: Dict[str, Any]
@@ -83,8 +79,6 @@ class QAState(TypedDict, total=False):
     viseme_frames: List[List[float]]
     viseme_chunks: List[Dict[str, Any]]
 
-    turn_slides_context: str
-    turn_knowledge_context: str
     meta: Dict[str, Any]
     timings: Dict[str, int]
 
@@ -149,14 +143,11 @@ async def n_prepare(state: QAState) -> QAState:
 
     state["slides_latest"] = {}
     state["slides_tool_used"] = False
-    state["knowledge_result"] = {}
-    state["knowledge_tool_used"] = False
+    state["tool_summaries"] = []
 
     state["emotion_final"] = {}
     state["viseme_frames"] = []
     state["viseme_chunks"] = []
-    state["turn_slides_context"] = ""
-    state["turn_knowledge_context"] = ""
 
     state["meta"] = {}
     state["timings"] = {"prepare_ms": elapsed_ms(t0)}
@@ -170,13 +161,12 @@ async def n_prepare(state: QAState) -> QAState:
 # =============================================================================
 async def _tool_router_and_stream(state: QAState):
     """
-    Router decides tool calls based on explicit instructions.
-    - We stream slides for ANY slides action or slides returned by knowledge.
-    - We DO NOT stream knowledge; we only inject it as grounding into the text model.
+    Router decides tool calls. We stream slides if present.
+    We DO NOT feed raw data to the text model — only summaries.
     """
     router = ChatOpenAI(model=(state.get("model") or "gpt-4o-mini"), temperature=S.router_temperature)
 
-    # Provide full context to tools (slides & knowledge need user/agent)
+    # Provide full context to tools
     set_tool_context({
         "session_id": state["session"].id,
         "bot_id": str(state["agent"].bot_id),
@@ -184,7 +174,7 @@ async def _tool_router_and_stream(state: QAState):
         "user_id": state["session"].user_id,
     })
 
-    # Compact recent history for routing context
+    # Trimmed recent history for the router
     recent_hist: List[str] = []
     for m in (state["base_msgs"] or [])[-6:]:
         label = "User" if isinstance(m, HumanMessage) else "Assistant"
@@ -203,8 +193,7 @@ async def _tool_router_and_stream(state: QAState):
         tool_calls = (getattr(ai, "tool_calls", []) or [])[: S.max_tool_calls]
         log.debug("[nodes:router] tool_calls=%s", [c.get("name") for c in tool_calls])
     except Exception:
-        log.exception("[nodes:router] failed")
-        tool_calls = []
+        log.exception("[nodes:router] routing failed")
 
     async def _exec(name: str, args: Dict[str, Any]):
         impl = AGENT_TOOLS.get(name)
@@ -213,49 +202,40 @@ async def _tool_router_and_stream(state: QAState):
             return
         try:
             res = await impl.ainvoke(args)
-            log.debug("[nodes:tool] %s -> status=%s", name, (res or {}).get("status"))
+            status = (res or {}).get("status", "ok")
+            summary = (res or {}).get("summary", "").strip()
+            state["tool_summaries"].append(f"[{name}] {status}: {summary}".strip())
+            log.debug("[nodes:tool] %s -> %s", name, status)
         except Exception:
             log.exception("[nodes:tool] %s call failed", name)
             return
 
-        # Slides-family: capture snapshot for context AND STREAM ALWAYS
-        if name in ("generate_or_update_slides", "fetch_latest_slides", "revert_slides"):
-            state["slides_tool_used"] = True
-            snap = (res or {}).get("slides") or {}
-            if snap:
-                state["slides_latest"] = snap
-                state["turn_slides_context"] = build_slides_context(snap)
-            if state.get("queue"):
-                await state["queue"].put({"type": "slides_response", "slides": snap})
-                await state["queue"].put({"type": "slides_done"})
+        data = (res or {}).get("data") or {}
 
-        # Knowledge answer: capture grounding (no streaming)
-        if name == "answer_from_knowledge":
-            state["knowledge_tool_used"] = True
-            kres = res or {}
-            state["knowledge_result"] = kres
-            state["turn_knowledge_context"] = build_knowledge_answer_context(kres)
-
-            # If knowledge tool created/updated slides, mirror slide streaming
-            snap = (kres or {}).get("slides") or {}
+        # Stream slides if present (cover all slide tools that can return a deck)
+        if name in ("slides_generate_or_update", "slides_fetch_latest", "slides_revert", "slides_diff_latest"):
+            snap = data.get("slides") or {}
             if snap:
                 state["slides_tool_used"] = True
                 state["slides_latest"] = snap
-                state["turn_slides_context"] = build_slides_context(snap)
                 if state.get("queue"):
                     await state["queue"].put({"type": "slides_response", "slides": snap})
                     await state["queue"].put({"type": "slides_done"})
 
-        # Knowledge listing: feed as grounding (no streaming)
-        if name == "list_knowledge":
-            state["knowledge_tool_used"] = True
-            assets = (res or {}).get("assets") or []
-            state["turn_knowledge_context"] = build_knowledge_list_context(assets)
+        # Documents family: if slides come back, stream them too
+        if name in ("documents_analyze", "documents_generate_slides"):
+            snap = data.get("slides") or {}
+            if snap:
+                state["slides_tool_used"] = True
+                state["slides_latest"] = snap
+                if state.get("queue"):
+                    await state["queue"].put({"type": "slides_response", "slides": snap})
+                    await state["queue"].put({"type": "slides_done"})
 
     for c in tool_calls:
         await _exec((c.get("name") or "").strip(), dict(c.get("args") or {}))
 
-    # Unblock text even if the router chose no slides actions
+    # Unblock text even if no slides were produced
     state["slides_ready_event"].set()
 
 # =============================================================================
@@ -266,15 +246,16 @@ async def _emit_emotion_before_text(state: QAState):
         if S.emotion_source == "none":
             emo = {"name": "Joy", "intensity": 1}
         else:
-            tool = AGENT_TOOLS.get("emotion_analyze")
+            tool = AGENT_TOOLS.get("emotion_detect")
             raw = getattr(state.get("user_msg"), "content", None) or (state.get("query") or "")
             text = (raw or "").strip()
             if not tool or not text:
                 emo = {"name": "Joy", "intensity": 1}
             else:
                 res = await tool.ainvoke({"text": text})
-                name = str((res or {}).get("name", "Joy")).title()
-                intensity_val = (res or {}).get("intensity", 1)
+                data = (res or {}).get("data") or {}
+                name = str(data.get("name", "Joy")).title()
+                intensity_val = data.get("intensity", 1)
                 try:
                     intensity = int(intensity_val)
                 except Exception:
@@ -311,12 +292,10 @@ async def _stream_text_with_audio(state: QAState):
         ))
     ]
 
-    if state["turn_slides_context"]:
-        msgs.append(SystemMessage(content="SLIDES CONTEXT:\n" + state["turn_slides_context"]))
-
-    if state["turn_knowledge_context"]:
-        # include knowledge grounding as system info for the text LLM (no separate streaming)
-        msgs.append(SystemMessage(content=state["turn_knowledge_context"]))
+    # Only pass summaries (no raw payloads) from tools to the text model
+    if state.get("tool_summaries"):
+        joined = "- " + "\n- ".join(s[:600] for s in state["tool_summaries"][:8])
+        msgs.append(SystemMessage(content="TOOL UPDATES:\n" + joined))
 
     msgs.extend(state["base_msgs"])
     msgs.append(state["user_msg"])
@@ -326,9 +305,9 @@ async def _stream_text_with_audio(state: QAState):
     voice_service = (getattr(voice, "service", "") or "").strip() if voice else ""
     voice_id = (getattr(voice, "voice_id", "") or "").strip() if voice else ""
 
-    # NEW: keep continuous viseme timeline metadata
+    # Continuous viseme timeline metadata
     chunk_index = 0
-    offset_ms_accum = 0  # absolute offset for each chunk’s visemes
+    offset_ms_accum = 0
 
     async for chunk in llm.astream(msgs, tools=[], tool_choice="none"):
         token = (getattr(chunk, "content", "") or "")
@@ -348,30 +327,25 @@ async def _stream_text_with_audio(state: QAState):
                     cleaned = await asyncio.to_thread(sanitize_and_verbalize_text, s, "en_GB", SanitizeOptions())
                     audio, v = await synthesize_tts_async(cleaned, voice_service, voice_id)
 
-                    # Compute absolute offset & annotate chunk
                     dur_ms = int(v.get("duration_ms") or 0)
                     chunk_payload = {
                         "type": "audio_response",
                         "audio": base64.b64encode(audio).decode("utf-8"),
-                        "audio_format": "mp3",            # explicit
-                        "chunk_index": chunk_index,       # ordering
-                        "offset_ms": offset_ms_accum,     # absolute timeline
-                        **v,                               # includes viseme, viseme_times, viseme_fps, frame_ms, etc.
+                        "audio_format": "mp3",
+                        "chunk_index": chunk_index,
+                        "offset_ms": offset_ms_accum,
+                        **v,
                     }
 
                     await state["queue"].put(chunk_payload)
 
-                    # Maintain rolling preview of frames
                     frames = v.get("viseme") or []
                     if isinstance(frames, list):
                         state["viseme_frames"].extend(frames)
                         if len(state["viseme_frames"]) > S.viseme_max_frames_to_store:
                             state["viseme_frames"] = state["viseme_frames"][-S.viseme_max_frames_to_store:]
 
-                    # Persist chunk-level viseme metadata
                     state["viseme_chunks"].append({**v, "chunk_index": chunk_index, "offset_ms": offset_ms_accum})
-
-                    # advance timeline
                     offset_ms_accum += max(0, dur_ms)
                     chunk_index += 1
                 except Exception:
@@ -437,7 +411,7 @@ async def n_finalize_and_persist(state: QAState) -> QAState:
             frame_ms_meta = None
 
     meta.update({
-        "schema": "engine.v10",
+        "schema": "engine.v11",
         "bot_id": state.get("bot_id"),
         "thread_id": state.get("thread_id"),
         "model": state.get("model") or "gpt-4o-mini",
@@ -446,10 +420,7 @@ async def n_finalize_and_persist(state: QAState) -> QAState:
         "tools": list(AGENT_TOOLS.keys()),
         "frame_ms": frame_ms_meta,
         "slides_tool_used": bool(state.get("slides_tool_used")),
-        "knowledge_tool_used": bool(state.get("knowledge_tool_used")),
-        # NEW: helpful counters
-        "viseme_chunks_count": len(viseme_chunks),
-        "viseme_frames_count": len(viseme_frames),
+        "tool_summaries": state.get("tool_summaries") or [],
     })
 
     viseme_json: Dict[str, Any] = {}
