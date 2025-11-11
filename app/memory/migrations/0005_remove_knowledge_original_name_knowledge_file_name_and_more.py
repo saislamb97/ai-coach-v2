@@ -24,6 +24,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='knowledge',
             name='file',
-            field=models.FileField(max_length=500, upload_to=memory.models.knowledge_upload_to, validators=[django.core.validators.FileExtensionValidator(allowed_extensions=['csv', 'doc', 'docx', 'json', 'pdf', 'tsv', 'txt', 'xls', 'xlsm', 'xlsx'])]),
+            field=models.FileField(max_length=500, upload_to=memory.models.document_upload_path, validators=[django.core.validators.FileExtensionValidator(allowed_extensions=['csv', 'doc', 'docx', 'json', 'pdf', 'tsv', 'txt', 'xls', 'xlsm', 'xlsx'])]),
         ),
     ]

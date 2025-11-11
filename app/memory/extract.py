@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -50,11 +51,11 @@ except Exception:  # pragma: no cover
 
 # ---------- Config ----------
 DEFAULT_TXT_ENCODING = "utf-8"
-READ_CHUNK_SIZE = 1 << 14  # 16 KiB
 SUBPROCESS_TIMEOUT = 60  # seconds
-MAX_SOFT_BYTES_TXT = None  # set to int to cap reads of giant .txt files
-MAX_SAMPLE_ROWS_PER_SHEET = 50  # for sheet sample text output (full counts still computed)
-MAX_SAMPLE_ROWS_CSV = 100       # for csv sample text output (full counts still computed)
+MAX_SOFT_BYTES_TXT = None  # set int to cap giant .txt reads; None = full read
+MAX_SAMPLE_ROWS_PER_SHEET = 50
+MAX_SAMPLE_ROWS_CSV = 100
+READ_SAMPLE_BYTES_FOR_SNIFF = 8192
 
 
 # ---------- Types ----------
@@ -62,8 +63,10 @@ MAX_SAMPLE_ROWS_CSV = 100       # for csv sample text output (full counts still 
 class ExtractionError(Exception):
     path: str
     reason: str
+
     def __str__(self) -> str:  # pragma: no cover
         return f"ExtractionError({self.path}): {self.reason}"
+
 
 @dataclass
 class ExtractionStats:
@@ -72,15 +75,16 @@ class ExtractionStats:
     num_words: int
     num_lines: int
 
+
 @dataclass
 class ExtractionResult:
     path: str
     mime: str
     ext: str
     encoding: Optional[str]
-    text: str  # sanitized plain text (may be sample-limited for huge tabulars)
+    text: str  # sanitized plain text (may be sample-limited for tabulars)
     stats: ExtractionStats
-    structure: Dict[str, Any]  # type-specific structured metadata
+    structure: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -89,7 +93,6 @@ class ExtractionResult:
 
 
 # ---------- Supported families ----------
-# (Only the requested families; “variations” within those families included)
 _EXT_TO_MIME = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -98,7 +101,7 @@ _EXT_TO_MIME = {
     ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
     ".xls": "application/vnd.ms-excel",
     ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",  # CSV variant
+    ".tsv": "text/tab-separated-values",
     ".txt": "text/plain",
     ".json": "application/json",
 }
@@ -119,20 +122,22 @@ def _run(cmd: List[str], *, timeout: int = SUBPROCESS_TIMEOUT) -> str:
     out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout)
     return out.decode("utf-8", "ignore")
 
+
 def _detect_encoding(path: str, default: str = DEFAULT_TXT_ENCODING) -> str:
     if not chardet:
         return default
     try:
         with open(path, "rb") as fh:
-            sample = fh.read(8192)
+            sample = fh.read(READ_SAMPLE_BYTES_FOR_SNIFF)
         guess = chardet.detect(sample)
         enc = guess.get("encoding") or default
         return enc
     except Exception:
         return default
 
+
 def detect_mime(path: str) -> str:
-    """Best-effort MIME detection using libmagic, then curated extension map, then mimetypes."""
+    """Best-effort MIME detection using libmagic, then curated map, then mimetypes."""
     if magic:
         try:
             with open(path, "rb") as fh:
@@ -145,10 +150,12 @@ def detect_mime(path: str) -> str:
     guess, _ = mimetypes.guess_type(path)
     return guess or "application/octet-stream"
 
-_CTRL_RE = re.compile(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]')
+
+_CTRL_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]")
+
 
 def _sanitize_text(s: Optional[str], *, keep_newlines: bool = True) -> str:
-    """Normalize newlines, strip NUL/controls (keep \t and \n), optionally collapse newlines."""
+    """Normalize newlines, strip control chars (keeps \\t and \\n)."""
     if s is None:
         return ""
     if not isinstance(s, str):
@@ -159,7 +166,9 @@ def _sanitize_text(s: Optional[str], *, keep_newlines: bool = True) -> str:
         s = s.replace("\n", " ")
     return s
 
+
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+
 
 def _basic_stats(text: str, size_bytes: int) -> ExtractionStats:
     return ExtractionStats(
@@ -169,12 +178,20 @@ def _basic_stats(text: str, size_bytes: int) -> ExtractionStats:
         num_lines=(text.count("\n") + (1 if text and not text.endswith("\n") else 0)),
     )
 
+
 def _require_ext(path: str) -> str:
     ext = Path(path).suffix.lower()
     if ext not in SUPPORTED_EXTS:
-        raise ExtractionError(path, f"Unsupported file type '{ext}'. "
-                                    f"Supported: {sorted(SUPPORTED_EXTS)}")
+        raise ExtractionError(path, f"Unsupported file type '{ext}'. Supported: {sorted(SUPPORTED_EXTS)}")
     return ext
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ---------- Readers ----------
@@ -192,7 +209,8 @@ def _read_txt(path: str, encoding: Optional[str] = None) -> Tuple[str, Dict[str,
     meta = {"kind": "text", "encoding": enc}
     return text, meta
 
-def _read_pdf(path: str) -> Tuple[str, Dict[str, Any]]:
+
+def _read_pdf_pymupdf(path: str) -> Tuple[str, Dict[str, Any]]:
     if not fitz:
         raise ExtractionError(path, "PDF support requires PyMuPDF (fitz)")
     doc = fitz.open(path)
@@ -217,17 +235,18 @@ def _read_pdf(path: str) -> Tuple[str, Dict[str, Any]]:
             total_images += img_count
             total_links += link_count
             total_annots += ann_count
-            pages_meta.append({
-                "index": i,
-                "chars": len(p_text),
-                "words": len(_WORD_RE.findall(p_text)),
-                "images": img_count,
-                "links": link_count,
-                "annotations": ann_count,
-            })
+            pages_meta.append(
+                {
+                    "index": i,
+                    "chars": len(p_text),
+                    "words": len(_WORD_RE.findall(p_text)),
+                    "images": img_count,
+                    "links": link_count,
+                    "annotations": ann_count,
+                }
+            )
             all_text_parts.append(p_text)
 
-        # Outline / table of contents (sections)
         outline: List[Dict[str, Any]] = []
         try:
             toc = doc.get_toc(simple=True) or []  # [level, title, page]
@@ -244,10 +263,33 @@ def _read_pdf(path: str) -> Tuple[str, Dict[str, Any]]:
             "total_images": total_images,
             "total_links": total_links,
             "total_annotations": total_annots,
+            "engine": "pymupdf",
         }
         return "\n".join(all_text_parts), meta
     finally:
         doc.close()
+
+
+def _read_pdf_pdftotext(path: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Fallback using poppler-utils 'pdftotext' if PyMuPDF is unavailable.
+    """
+    if not shutil.which("pdftotext"):
+        raise ExtractionError(path, "No PDF engine available (install PyMuPDF or pdftotext).")
+    out = _run(["pdftotext", "-layout", path, "-"])  # preserve layout best-effort
+    meta = {"kind": "pdf", "engine": "pdftotext"}
+    return out, meta
+
+
+def _read_pdf(path: str) -> Tuple[str, Dict[str, Any]]:
+    try:
+        return _read_pdf_pymupdf(path)
+    except ExtractionError as e:
+        # try fallback only if engine missing
+        if "PyMuPDF" in e.reason:
+            return _read_pdf_pdftotext(path)
+        raise
+
 
 def _read_docx(path: str) -> Tuple[str, Dict[str, Any]]:
     if not docx:
@@ -260,13 +302,11 @@ def _read_docx(path: str) -> Tuple[str, Dict[str, Any]]:
         txt = p.text or ""
         if txt:
             parts.append(txt)
-        # heading detection by style
         try:
             style_name = (p.style.name or "").strip()
         except Exception:
             style_name = ""
         if style_name.lower().startswith("heading"):
-            # attempt to parse heading level from style name
             m = re.search(r"(\d+)$", style_name)
             level = int(m.group(1)) if m else None
             headings.append({"title": txt, "level": level, "style": style_name})
@@ -282,8 +322,6 @@ def _read_docx(path: str) -> Tuple[str, Dict[str, Any]]:
             except Exception:
                 header = []
         tables_meta.append({"index": ti, "rows": nrows, "cols": ncols, "header": header})
-
-        # Also append table text in TSV-ish lines
         for row in t.rows[:MAX_SAMPLE_ROWS_PER_SHEET]:
             parts.append("\t".join(c.text or "" for c in row.cells))
 
@@ -296,6 +334,7 @@ def _read_docx(path: str) -> Tuple[str, Dict[str, Any]]:
     }
     return "\n".join(parts), meta
 
+
 def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
     """
     Read legacy .doc using progressive fallbacks:
@@ -303,7 +342,6 @@ def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
       2) catdoc
       3) LibreOffice headless conversion to TXT
     """
-    # 1) antiword
     if shutil.which("antiword"):
         try:
             text = _run(["antiword", path])
@@ -311,7 +349,6 @@ def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
         except Exception as e:
             logger.info("antiword failed on %s: %s", path, e)
 
-    # 2) catdoc
     if shutil.which("catdoc"):
         try:
             text = _run(["catdoc", "-w", path])
@@ -319,7 +356,6 @@ def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
         except Exception as e:
             logger.info("catdoc failed on %s: %s", path, e)
 
-    # 3) LibreOffice headless
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:
         tmp_dir = Path(path).parent
@@ -340,6 +376,7 @@ def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
 
     raise ExtractionError(path, "Cannot read .doc; install antiword/catdoc or LibreOffice")
 
+
 def _read_xlsx_like(path: str) -> Tuple[str, Dict[str, Any]]:
     """
     XLSX/XLSM via openpyxl (streaming read); XLS via xlrd.
@@ -359,7 +396,6 @@ def _read_xlsx_like(path: str) -> Tuple[str, Dict[str, Any]]:
                 header: List[str] = []
                 sample_rows = 0
                 text_parts.append(f"# Sheet: {ws.title}")
-
                 for i, row in enumerate(ws.iter_rows(values_only=True)):
                     values = ["" if c is None else str(c) for c in row]
                     rows += 1
@@ -369,19 +405,12 @@ def _read_xlsx_like(path: str) -> Tuple[str, Dict[str, Any]]:
                     if sample_rows < MAX_SAMPLE_ROWS_PER_SHEET:
                         text_parts.append("\t".join(values))
                         sample_rows += 1
-
-                sheets_meta.append({
-                    "title": ws.title,
-                    "rows": rows,
-                    "cols": cols_max,
-                    "header": header,
-                })
+                sheets_meta.append({"title": ws.title, "rows": rows, "cols": cols_max, "header": header})
             meta = {"kind": "excel", "engine": "openpyxl", "sheet_count": len(sheets_meta), "sheets": sheets_meta}
             return "\n".join(text_parts), meta
         finally:
             wb.close()
 
-    # legacy .xls
     if ext == ".xls":
         if not xlrd:
             raise ExtractionError(path, "XLS support requires xlrd<2.0 (legacy .xls)")
@@ -393,12 +422,7 @@ def _read_xlsx_like(path: str) -> Tuple[str, Dict[str, Any]]:
             rows = sh.nrows
             cols = sh.ncols
             header = [str(sh.cell_value(0, c)) for c in range(cols)] if rows else []
-            sheets_meta.append({
-                "title": sh.name,
-                "rows": rows,
-                "cols": cols,
-                "header": header,
-            })
+            sheets_meta.append({"title": sh.name, "rows": rows, "cols": cols, "header": header})
             text_parts.append(f"# Sheet: {sh.name}")
             for r in range(min(rows, MAX_SAMPLE_ROWS_PER_SHEET)):
                 values = [str(sh.cell_value(r, c)) for c in range(cols)]
@@ -408,8 +432,8 @@ def _read_xlsx_like(path: str) -> Tuple[str, Dict[str, Any]]:
 
     raise ExtractionError(path, f"Unsupported Excel extension '{ext}'")
 
+
 def _read_csv_tsv_stream(path: str, delimiter: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
-    # Stream to avoid memory blowups and compute structure while building a sample text
     enc = _detect_encoding(path)
     row_count = 0
     cols_max = 0
@@ -419,10 +443,8 @@ def _read_csv_tsv_stream(path: str, delimiter: Optional[str] = None) -> Tuple[st
     sample_buffer = io.StringIO()
 
     with open(path, "r", encoding=enc, errors="ignore", newline="") as fh:
-        head = fh.read(8192)
+        head = fh.read(READ_SAMPLE_BYTES_FOR_SNIFF)
         fh.seek(0)
-
-        # Sniff delimiter and header if needed
         if delimiter is None:
             try:
                 dialect = csv.Sniffer().sniff(head)
@@ -456,19 +478,18 @@ def _read_csv_tsv_stream(path: str, delimiter: Optional[str] = None) -> Tuple[st
     }
     return sample_buffer.getvalue(), meta
 
+
 def _read_json(path: str) -> Tuple[str, Dict[str, Any]]:
     enc = _detect_encoding(path)
     with open(path, "r", encoding=enc, errors="ignore") as fh:
         data = json.load(fh)
 
-    # Shallow "shape" summary
     shape: Dict[str, Any] = {}
     if isinstance(data, dict):
         keys = list(data.keys())
         shape = {"type": "object", "keys": keys, "key_count": len(keys)}
     elif isinstance(data, list):
         shape = {"type": "array", "length": len(data)}
-        # if list of objects, unify keys as columns
         columns: List[str] = []
         if data and all(isinstance(x, dict) for x in data):
             seen = {}
@@ -488,13 +509,7 @@ def _read_json(path: str) -> Tuple[str, Dict[str, Any]]:
 # ---------- Public API ----------
 def extract_rich(path: str) -> ExtractionResult:
     """
-    Extract text + structured metadata from the requested file families only:
-      - Text (.txt)
-      - PDF (.pdf)
-      - Word (.doc/.docx)
-      - Excel (.xls/.xlsx/.xlsm)
-      - CSV (.csv and .tsv as a CSV variant)
-      - JSON (.json)
+    Extract text + structured metadata for supported families.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -503,7 +518,6 @@ def extract_rich(path: str) -> ExtractionResult:
     mime = detect_mime(path)
     size = os.path.getsize(path)
 
-    # Dispatch
     try:
         if ext in PDF_EXTS:
             text_raw, meta = _read_pdf(path)
@@ -527,7 +541,6 @@ def extract_rich(path: str) -> ExtractionResult:
             text_raw, meta = _read_json(path)
             encoding = meta.get("encoding")
         else:
-            # Shouldn't happen due to _require_ext
             raise ExtractionError(path, f"Unsupported extension '{ext}'")
     except ExtractionError:
         raise
@@ -548,36 +561,47 @@ def extract_rich(path: str) -> ExtractionResult:
         structure=meta,
     )
 
-def extract_text(path: str) -> str:
-    """
-    Backward-compatible thin wrapper returning only the text content.
-    Prefer `extract_rich(path)` for structured metadata.
-    """
-    return extract_rich(path).text
 
-def extract_to_json(path: str) -> str:
-    """Convenience: return a JSON string with text + metadata."""
-    return json.dumps(extract_rich(path).to_dict(), ensure_ascii=False, indent=2)
+def extract(path: str, *, original_filename: Optional[str] = None) -> Dict[str, Any]:
+    """
+    High-level API expected by models.Document.extract_and_index():
+      - returns a dict with 'content' and rich metadata (everything else)
+      - includes file_name, mime, ext, encoding, size_bytes, sha256, stats, structure
+    """
+    res = extract_rich(path)
+    try:
+        sha256 = _sha256_file(path)
+    except Exception:
+        sha256 = ""
 
-def extract_many(paths: Iterable[str]) -> List[ExtractionResult]:
-    """Batch helper."""
-    results: List[ExtractionResult] = []
-    for p in paths:
-        try:
-            results.append(extract_rich(p))
-        except Exception as e:
-            logger.error("Failed to extract %s: %s", p, e)
-            # Continue after failure, but store a stub error result
-            results.append(ExtractionResult(
-                path=os.path.abspath(p),
-                mime=detect_mime(p) if os.path.exists(p) else "application/octet-stream",
-                ext=Path(p).suffix.lower(),
-                encoding=None,
-                text="",
-                stats=ExtractionStats(
-                    size_bytes=os.path.getsize(p) if os.path.exists(p) else 0,
-                    num_chars=0, num_words=0, num_lines=0
-                ),
-                structure={"error": str(e)},
-            ))
-    return results
+    meta: Dict[str, Any] = {
+        "file_name": original_filename or os.path.basename(path),
+        "path": res.path,
+        "mime": res.mime,
+        "ext": res.ext,
+        "encoding": res.encoding,
+        "size_bytes": res.stats.size_bytes,
+        "sha256": sha256,
+        "stats": {
+            "num_chars": res.stats.num_chars,
+            "num_words": res.stats.num_words,
+            "num_lines": res.stats.num_lines,
+        },
+        **({"structure": res.structure} if res.structure else {}),
+    }
+
+    return {
+        "content": res.text,  # LLM-ready text/TSV/pretty JSON
+        **meta,               # everything else goes to Document.meta
+    }
+
+
+__all__ = [
+    "SUPPORTED_EXTS",
+    "ExtractionError",
+    "ExtractionResult",
+    "ExtractionStats",
+    "detect_mime",
+    "extract",
+    "extract_rich",
+]

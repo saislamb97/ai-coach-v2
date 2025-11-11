@@ -1,4 +1,3 @@
-# nodes.py
 from __future__ import annotations
 
 import asyncio
@@ -14,9 +13,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 
 from agent.models import Agent
+from engine.tokens import TokenLimits
 from memory.models import Session
-from .tokens import TokenLimits
-from .tools import AGENT_TOOLS, TOOLS_SCHEMA, set_tool_context
+from engine.tools.registry import AGENT_TOOLS, TOOLS_SCHEMA, set_tool_context
 from .tts_stt import synthesize_tts_async
 from stream.text_sanitize import SanitizeOptions, sanitize_and_verbalize_text
 
@@ -37,7 +36,7 @@ class Settings:
     text_temperature: float = 0.1
     router_temperature: float = 0.1
     max_history_pairs: int = 50
-    tool_timeout_s: int = 20
+    tool_timeout_s: int = 25               # wait for tool results so first reply includes them
     max_tool_calls: int = 6
     emotion_model: str = "gpt-4o-mini"
     emotion_timeout_s: float = 6.0
@@ -161,8 +160,8 @@ async def n_prepare(state: QAState) -> QAState:
 # =============================================================================
 async def _tool_router_and_stream(state: QAState):
     """
-    Router decides tool calls. We stream slides if present.
-    We DO NOT feed raw data to the text model — only summaries.
+    Decide and execute tool calls. We WAIT for tools to finish before starting text,
+    so the very first assistant message already includes tool results.
     """
     router = ChatOpenAI(model=(state.get("model") or "gpt-4o-mini"), temperature=S.router_temperature)
 
@@ -200,20 +199,41 @@ async def _tool_router_and_stream(state: QAState):
         if not impl:
             log.warning("[nodes:tool] unknown tool: %s", name)
             return
+
+        # Always await the tool so we include its results in the first reply
+        res: Dict[str, Any] | None = None
         try:
-            res = await impl.ainvoke(args)
+            res = await asyncio.wait_for(impl.ainvoke(args), timeout=S.tool_timeout_s)
             status = (res or {}).get("status", "ok")
             summary = (res or {}).get("summary", "").strip()
             state["tool_summaries"].append(f"[{name}] {status}: {summary}".strip())
             log.debug("[nodes:tool] %s -> %s", name, status)
+        except asyncio.TimeoutError:
+            msg = f"[{name}] timeout after {S.tool_timeout_s}s."
+            state["tool_summaries"].append(msg)
+            log.warning("[nodes:tool] %s", msg)
+            return
         except Exception:
             log.exception("[nodes:tool] %s call failed", name)
             return
 
         data = (res or {}).get("data") or {}
 
-        # Stream slides if present (cover all slide tools that can return a deck)
-        if name in ("slides_generate_or_update", "slides_fetch_latest", "slides_revert", "slides_diff_latest"):
+        # If a deck snapshot is returned, stream it immediately to the UI
+        slide_tools = {
+            "slides_generate_or_update",
+            "slides_fetch_latest",
+            "slides_list_versions",   # also returns latest deck
+            "slides_diff_latest",
+            "slides_revert",
+            "slides_add_sections",
+            "slides_remove_sections",
+            "slides_edit",
+            # docs tools can also emit slides
+            "documents_analyze",
+            "documents_generate_slides",
+        }
+        if name in slide_tools:
             snap = data.get("slides") or {}
             if snap:
                 state["slides_tool_used"] = True
@@ -222,16 +242,7 @@ async def _tool_router_and_stream(state: QAState):
                     await state["queue"].put({"type": "slides_response", "slides": snap})
                     await state["queue"].put({"type": "slides_done"})
 
-        # Documents family: if slides come back, stream them too
-        if name in ("documents_analyze", "documents_generate_slides"):
-            snap = data.get("slides") or {}
-            if snap:
-                state["slides_tool_used"] = True
-                state["slides_latest"] = snap
-                if state.get("queue"):
-                    await state["queue"].put({"type": "slides_response", "slides": snap})
-                    await state["queue"].put({"type": "slides_done"})
-
+    # Execute tools sequentially (keeps ordering and is easier to reason about for summaries)
     for c in tool_calls:
         await _exec((c.get("name") or "").strip(), dict(c.get("args") or {}))
 
@@ -252,7 +263,7 @@ async def _emit_emotion_before_text(state: QAState):
             if not tool or not text:
                 emo = {"name": "Joy", "intensity": 1}
             else:
-                res = await tool.ainvoke({"text": text})
+                res = await asyncio.wait_for(tool.ainvoke({"text": text}), timeout=S.emotion_timeout_s)
                 data = (res or {}).get("data") or {}
                 name = str(data.get("name", "Joy")).title()
                 intensity_val = data.get("intensity", 1)
@@ -278,21 +289,24 @@ async def _emit_emotion_before_text(state: QAState):
 # Text streaming + sentence-level audio (MP3 + ARKit15 visemes)
 # =============================================================================
 async def _stream_text_with_audio(state: QAState):
-    # gate on tools + emotion
+    # Wait for tools + emotion so first text contains tool results
     await asyncio.gather(state["slides_ready_event"].wait(), state["emotion_ready_event"].wait())
 
     model_name = state.get("model") or "gpt-4o-mini"
     llm = ChatOpenAI(model=model_name, temperature=S.text_temperature, streaming=True)
 
+    # Inject agent info (name/persona/description) in the system message
+    agent = state["agent"]
     msgs: List[BaseMessage] = [
         SystemMessage(content=build_text_system_prompt(
-            bot_name=state["agent"].name or "Assistant",
-            bot_id=str(state["agent"].bot_id),
-            instruction=(state["agent"].persona or "").strip(),
+            bot_name=agent.name or "Assistant",
+            bot_id=str(agent.bot_id),
+            persona=(agent.persona or ""),
+            description=(agent.description or ""),
         ))
     ]
 
-    # Only pass summaries (no raw payloads) from tools to the text model
+    # Concise tool summaries become context for the text model
     if state.get("tool_summaries"):
         joined = "- " + "\n- ".join(s[:600] for s in state["tool_summaries"][:8])
         msgs.append(SystemMessage(content="TOOL UPDATES:\n" + joined))
@@ -301,7 +315,7 @@ async def _stream_text_with_audio(state: QAState):
     msgs.append(state["user_msg"])
 
     buf, final_text = "", ""
-    voice = getattr(state["agent"], "voice", None)
+    voice = getattr(agent, "voice", None)
     voice_service = (getattr(voice, "service", "") or "").strip() if voice else ""
     voice_id = (getattr(voice, "voice_id", "") or "").strip() if voice else ""
 
@@ -389,6 +403,7 @@ async def _stream_text_with_audio(state: QAState):
 # =============================================================================
 async def n_run(state: QAState) -> QAState:
     t0 = time.perf_counter()
+    # Run tools + emotion first; text streaming waits on events (tools/emotion) before emitting any tokens
     await asyncio.gather(
         _tool_router_and_stream(state),
         _emit_emotion_before_text(state),
@@ -411,7 +426,7 @@ async def n_finalize_and_persist(state: QAState) -> QAState:
             frame_ms_meta = None
 
     meta.update({
-        "schema": "engine.v11",
+        "schema": "engine.v12",
         "bot_id": state.get("bot_id"),
         "thread_id": state.get("thread_id"),
         "model": state.get("model") or "gpt-4o-mini",

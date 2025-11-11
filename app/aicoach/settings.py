@@ -182,30 +182,23 @@ DATABASES = {
     }
 }
 
-# =============================================================================
-# Redis endpoints (split per subsystem; override via env)
-# =============================================================================
-REDIS_URL_CACHE    = os.getenv("REDIS_URL_CACHE",    "redis://localhost:6379/1")
-REDIS_URL_CHANNELS = os.getenv("REDIS_URL_CHANNELS", "redis://localhost:6379/2")
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/3")
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/4")
+# ---------------------------------------------------------------------
+# Redis (shared for Celery, Channels, Cache)
+# ---------------------------------------------------------------------
+REDIS_URL_CACHE    = os.getenv("REDIS_URL_CACHE",    "redis://localhost:6379/0")
+REDIS_URL_CHANNELS = os.getenv("REDIS_URL_CHANNELS", "redis://localhost:6379/1")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/2")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/3")
 
-
-# =============================================================================
-# Cache (Django)
-# =============================================================================
-CACHES: Dict[str, Any] = {
+# Django cache
+CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL_CACHE,
-        # Optional: small key prefix if you share Redis across projects
-        "KEY_PREFIX": os.getenv("CACHE_KEY_PREFIX", "aicoach"),
     }
 }
 
-# =============================================================================
-# Channels (Django Channels)
-# =============================================================================
+# Django Channels
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
@@ -213,17 +206,28 @@ CHANNEL_LAYERS = {
     }
 }
 
-
-# =============================================================================
-# Celery (Redis broker/result)
-# =============================================================================
-# sensible, still minimal
-CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# ---------------------------------------------------------------------
+# Celery basic config
+# ---------------------------------------------------------------------
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", os.getenv("TIME_ZONE", "Asia/Kuala_Lumpur"))
+
+CELERY_TIMEZONE = "Asia/Kuala_Lumpur"
 CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# ---------------------------------------------------------------------
+# Celery Beat schedule (example)
+# ---------------------------------------------------------------------
+CELERY_BEAT_SCHEDULE = {
+    "memory.prune_idle_sessions.every_30_min": {
+        "task": "memory.tasks.prune_idle_sessions",
+        "schedule": crontab(minute="*/30"),
+        "kwargs": {"minutes": 30},
+    },
+}
 
 # =============================================================================
 # DRF / Swagger
@@ -251,9 +255,18 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Welcome to AI Coach Agent Portal.",
     "VERSION": "1.0.0",
     "SCHEMA_PATH_PREFIX": r"/api/",
-    "CONTACT": {"name": "AI Coach AI Agent Team", "email": "support@nudgyt.com", "url": "https://aicoach.nudgyt.com"},
+    "CONTACT": {
+        "name": "AI Coach AI Agent Team",
+        "email": "support@nudgyt.com",
+        "url": "https://aicoach.nudgyt.com",
+    },
     "SECURITY_SCHEMES": {
-        "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "Authorization", "description": "Format: `Api-Key <key>`"}
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "Authorization",
+            "description": "Format: `Api-Key <key>`",
+        }
     },
     "SECURITY": [{"ApiKeyAuth": []}],
 }

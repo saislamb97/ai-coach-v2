@@ -48,7 +48,7 @@ class Migration(migrations.Migration):
                 ('key', models.UUIDField(default=uuid.uuid4, editable=False, unique=True)),
                 ('title', models.CharField(blank=True, default='', help_text='Optional human-readable title.', max_length=255)),
                 ('original_name', models.CharField(help_text='Original filename at upload time.', max_length=255)),
-                ('file', models.FileField(max_length=500, upload_to=memory.models.knowledge_upload_to)),
+                ('file', models.FileField(max_length=500, upload_to=memory.models.document_upload_path)),
                 ('size_bytes', models.BigIntegerField(default=0)),
                 ('mimetype', models.CharField(blank=True, default='', max_length=100)),
                 ('sha256', models.CharField(blank=True, default='', max_length=64)),

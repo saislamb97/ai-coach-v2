@@ -9,7 +9,7 @@ from .views import (
     SessionViewSet,
     ChatViewSet,
     SlidesViewSet,
-    KnowledgeViewSet,
+    DocumentViewSet,
     docView,
     testView,
 )
@@ -20,7 +20,7 @@ router.register(r"agents", AgentViewSet, basename="agent")
 router.register(r"sessions", SessionViewSet, basename="session")
 router.register(r"chats", ChatViewSet, basename="chat")
 router.register(r"slides", SlidesViewSet, basename="slides")
-router.register(r"knowledge", KnowledgeViewSet, basename="knowledge")  # ← NEW
+router.register(r"document", DocumentViewSet, basename="document")
 
 app_name = "api"
 

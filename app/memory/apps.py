@@ -6,5 +6,6 @@ class MemoryConfig(AppConfig):
     name = "memory"
 
     def ready(self):
-        # Import signals so the receivers register on app load
-        import memory.signals  # noqa: F401
+        print("⚡ MemoryConfig.ready() called — signals loaded")
+        from . import signals  # noqa
+

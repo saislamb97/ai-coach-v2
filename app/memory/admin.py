@@ -13,7 +13,7 @@ from memory.extract import SUPPORTED_EXTS  # single source of truth for allowed 
 from .models import (
     Session, Chat,
     Slides, SlidesRevision,
-    Knowledge,
+    Document,
 )
 
 # ==========================================================
@@ -150,16 +150,13 @@ class SlidesRevisionInline(PrettyMixin, admin.StackedInline):
     readonly_fields = fields
     max_num = 0  # no adding through inline; read-only snapshots
 
-    # IMPORTANT: do NOT override get_queryset() here with slicing.
-    # Instead, limit inside the formset AFTER Django filters by FK.
-
     def get_formset(self, request, obj=None, **kwargs):
         FormSet = super().get_formset(request, obj, **kwargs)
 
         class LatestThreeFormSet(FormSet):
             def get_queryset(self):
                 qs = super().get_queryset().order_by("-version")
-                return qs[:3]  # slicing is safe here
+                return qs[:3]
 
         return LatestThreeFormSet
 
@@ -293,13 +290,12 @@ class SlidesRevisionAdmin(PrettyMixin, admin.ModelAdmin):
 
 
 # ==========================================================
-# Knowledge
+# Document
 # ==========================================================
 
-# ---- Single-file form (create/edit). Enforce extensions & add <input accept="...">.
-class KnowledgeAdminForm(forms.ModelForm):
+class DocumentAdminForm(forms.ModelForm):
     class Meta:
-        model = Knowledge
+        model = Document
         fields = "__all__"
 
     def __init__(self, *args, **kwargs):
@@ -321,100 +317,118 @@ class KnowledgeAdminForm(forms.ModelForm):
         return f
 
 
-@admin.register(Knowledge)
-class KnowledgeAdmin(PrettyMixin, admin.ModelAdmin):
-    form = KnowledgeAdminForm
+@admin.register(Document)
+class DocumentAdmin(PrettyMixin, admin.ModelAdmin):
+    form = DocumentAdminForm
 
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
-    list_select_related = ("user", "agent")
+    list_select_related = ("session", "session__user", "session__agent")
     list_per_page = 25
 
     list_display = (
-        "short_name", "agent", "user",
-        "key", "mimetype", "size_kb",
-        "index_status", "created_at",
+        "display_name",
+        "agent_display",
+        "user_display",
+        "session_thread",
+        "size_kb",
+        "index_status",
+        "created_at",
     )
-    list_filter = ("agent", "user", "index_status", "mimetype", "created_at")
-    search_fields = ("file_name", "title", "key", "normalized_name", "search_terms")
+    list_filter = ("session__agent", "session__user", "index_status", "created_at")
+    search_fields = ("title", "normalized_name", "sha256", "session__thread_id")
 
     readonly_fields = (
-        "created_at", "updated_at",
+        "created_at",
+        "updated_at",
         "file_link",
-        "file_name",
-        "mimetype", "size_bytes", "sha256", "ext",
-        "pages", "rows", "cols",
-        "excerpt_preview", "meta_pretty", "index_meta_pretty",
-        "normalized_name", "search_terms",
+        "sha256",
+        "normalized_name",
+        "search_terms",
+        "content_preview",
+        "meta_pretty",
     )
 
     fields = (
-        ("user", "agent"),
-        ("title", "file_name"),  # file_name is readonly, auto-derived on save
+        ("session",),
+        ("title",),
         "file",
-        ("mimetype", "ext", "size_bytes"),
-        ("pages", "rows", "cols"),
-        "excerpt",
         ("index_status",),
+        "content",
         ("created_at", "updated_at"),
         "file_link",
-        "normalized_name", "search_terms",
+        ("sha256", "normalized_name"),
+        "search_terms",
         "meta_pretty",
-        "index_meta_pretty",
     )
 
     actions = ("action_extract_and_index", "mark_unindexed")
 
-    @admin.display(description="Name")
-    def short_name(self, obj: Knowledge):
-        return obj.display_name
+    # --- helpers / displays ---
+    @admin.display(description="Thread")
+    def session_thread(self, obj: Document):
+        return getattr(obj.session, "thread_id", "—")
+
+    @admin.display(description="Agent")
+    def agent_display(self, obj: Document):
+        return getattr(obj.session, "agent", "—")
+
+    @admin.display(description="User")
+    def user_display(self, obj: Document):
+        return getattr(obj.session, "user", "—")
 
     @admin.display(description="Size (KB)")
-    def size_kb(self, obj: Knowledge):
+    def size_kb(self, obj: Document):
         try:
-            return f"{obj.size_bytes // 1024:,}"
+            return f"{(obj.file.size // 1024):,}"
         except Exception:
             return "—"
 
     @admin.display(description="File")
-    def file_link(self, obj: Knowledge):
+    def file_link(self, obj: Document):
         if not obj.file:
             return mark_safe("<em>—</em>")
-        url = obj.file.url
+        try:
+            url = obj.file.url
+        except Exception:
+            return mark_safe("<em>(no url)</em>")
         return mark_safe(f"<a href='{url}' target='_blank' rel='noopener'>download</a>")
 
-    @admin.display(description="Excerpt (preview)")
-    def excerpt_preview(self, obj: Knowledge):
-        return self._preview(obj.excerpt, 600)
+    @admin.display(description="Content (preview)")
+    def content_preview(self, obj: Document):
+        return self._preview(obj.content, 800)
 
     @admin.display(description="Meta")
-    def meta_pretty(self, obj: Knowledge):
+    def meta_pretty(self, obj: Document):
         return self._json_pretty(obj.meta, max_height=240)
 
-    @admin.display(description="Index Meta")
-    def index_meta_pretty(self, obj: Knowledge):
-        return self._json_pretty(obj.index_meta, max_height=240)
-
+    # --- actions ---
     @admin.action(description="Extract & index selected")
     def action_extract_and_index(self, request, queryset):
-        # optional admin reindex; Celery already does this on create/change
         ok = 0
-        for asset in queryset:
+        for doc in queryset:
             try:
-                asset.extract_and_index()
-                asset.refresh_search_terms()
-                asset.save(update_fields=[
-                    "file_name",
-                    "size_bytes", "mimetype", "sha256", "ext",
-                    "pages", "rows", "cols", "excerpt", "meta",
-                    "index_status", "index_meta", "normalized_name", "search_terms", "updated_at"
-                ])
+                doc.extract_and_index()
+                doc.refresh_search_terms()
+                doc.save(
+                    update_fields=[
+                        "title",
+                        "content",
+                        "meta",
+                        "index_status",
+                        "normalized_name",
+                        "search_terms",
+                        "sha256",
+                        "updated_at",
+                    ]
+                )
                 ok += 1
             except Exception as e:
-                self.message_user(request, f"Failed to reindex {asset.id}: {e}", level=messages.ERROR)
+                self.message_user(request, f"Failed to reindex {doc.id}: {e}", level=messages.ERROR)
         self.message_user(request, f"Processed {ok} item(s).")
 
     @admin.action(description="Mark as unindexed")
     def mark_unindexed(self, request, queryset):
-        n = queryset.update(index_status=Knowledge.IndexStatus.UNINDEXED)
+        from .models import Document as DocModel
+        n = queryset.update(index_status=DocModel.IndexStatus.UNINDEXED)
         self.message_user(request, f"Marked {n} item(s) as unindexed.")

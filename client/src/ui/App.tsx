@@ -8,7 +8,7 @@ import SlidesPane from './SlidesPane'
 import ChatPane from './ChatPane'
 import RPMEmbed from './RPMEmbed'
 
-const LS_GLB = 'glb_url'
+const LS_GLB = 'glb'
 
 function Chip({ children }: { children: React.ReactNode }) {
   return (
@@ -79,7 +79,7 @@ export default function App() {
         const fromLs = localStorage.getItem(LS_GLB) || ''
         const agent = await fetchAgent().catch(() => null)
         if (cancelled) return
-        const serverGlb = agent?.glb_url || ''
+        const serverGlb = agent?.glb || ''
         const chosen = serverGlb || fromLs
         if (chosen) setGlbUrl(chosen)
         else setRpmOpen(true)

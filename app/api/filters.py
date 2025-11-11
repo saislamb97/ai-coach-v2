@@ -1,7 +1,10 @@
+# api/filters.py
 from __future__ import annotations
 import django_filters as df
+
 from agent.models import Voice, Agent
-from memory.models import Session, Chat, Slides, Knowledge
+from memory.models import Session, Chat, Slides, Document
+
 
 class VoiceFilter(df.FilterSet):
     name = df.CharFilter(lookup_expr="icontains")
@@ -16,15 +19,15 @@ class VoiceFilter(df.FilterSet):
 class AgentFilter(df.FilterSet):
     bot_id = df.UUIDFilter()
     is_active = df.BooleanFilter()
+    name = df.CharFilter(lookup_expr="icontains")
 
     class Meta:
         model = Agent
-        fields = ["bot_id", "is_active"]
+        fields = ["bot_id", "is_active", "name"]
 
 
 class SessionFilter(df.FilterSet):
     thread_id = df.CharFilter()
-    # expose Agent's bot_id as 'bot_id'
     bot_id = df.UUIDFilter(field_name="agent__bot_id")
     is_active = df.BooleanFilter()
 
@@ -34,7 +37,6 @@ class SessionFilter(df.FilterSet):
 
 
 class ChatFilter(df.FilterSet):
-    # DO NOT expose 'session' in requests; use thread_id only
     thread_id = df.CharFilter(field_name="session__thread_id")
 
     class Meta:
@@ -43,7 +45,6 @@ class ChatFilter(df.FilterSet):
 
 
 class SlidesFilter(df.FilterSet):
-    # DO NOT expose 'session' in requests; use thread_id only
     thread_id = df.CharFilter(field_name="session__thread_id")
     title = df.CharFilter(lookup_expr="icontains")
 
@@ -52,14 +53,11 @@ class SlidesFilter(df.FilterSet):
         fields = ["thread_id", "title"]
 
 
-class KnowledgeFilter(df.FilterSet):
-    # DO NOT expose 'agent' in requests; use bot_id only
-    bot_id = df.UUIDFilter(field_name="agent__bot_id")
-    mimetype = df.CharFilter()
-    index_status = df.CharFilter()
+class DocumentFilter(df.FilterSet):
+    thread_id = df.CharFilter(field_name="session__thread_id")
     title = df.CharFilter(lookup_expr="icontains")
-    file_name = df.CharFilter(lookup_expr="icontains")
+    index_status = df.ChoiceFilter(choices=Document.IndexStatus.choices)
 
     class Meta:
-        model = Knowledge
-        fields = ["bot_id", "mimetype", "index_status", "title", "file_name"]
+        model = Document
+        fields = ["thread_id", "title", "index_status"]

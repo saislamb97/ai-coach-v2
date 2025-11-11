@@ -48,8 +48,8 @@ class AgentAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ("Identity", {"fields": ("user", "name", "bot_id", "is_active")}),
-        ("Behavior", {"fields": ("persona", "max_tokens")}),
-        ("Assets", {"fields": ("voice", "avatar", "glb_url")}),
+        ("Behavior", {"fields": ("description", "persona", "age", "max_tokens")}),
+        ("Assets", {"fields": ("voice", "avatar", "glb")}),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
 

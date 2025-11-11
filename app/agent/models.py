@@ -87,10 +87,12 @@ class Agent(CacheMixin, models.Model):
     bot_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True)
 
     name = models.CharField(max_length=250)
+    description = models.TextField(max_length=500, blank=True)
     persona = models.TextField(max_length=500, blank=True)
+    age = models.IntegerField(blank=True, null=True)
     max_tokens = models.IntegerField(default=300)
 
-    glb_url = models.URLField(max_length=500, blank=True, null=True)
+    glb = models.URLField(max_length=500, blank=True, null=True)
     avatar = models.ImageField(upload_to=agent_upload_path, max_length=250, blank=True, null=True)
 
     is_active = models.BooleanField(default=True)

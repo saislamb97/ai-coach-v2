@@ -10,13 +10,13 @@ from rest_framework.exceptions import ValidationError
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter
 
 from agent.models import Voice, Agent
-from memory.models import Session, Chat, Slides, Knowledge
+from memory.models import Session, Chat, Slides, Document
 
 from api.auth import ApiKeyAuthentication
 from api.permissions import HasValidAPIKeyAndAllowedOrigin
 from api.mixins import TenantScopedQuerysetMixin
 from api.filters import (
-    VoiceFilter, AgentFilter, SessionFilter, ChatFilter, SlidesFilter, KnowledgeFilter
+    VoiceFilter, AgentFilter, SessionFilter, ChatFilter, SlidesFilter, DocumentFilter
 )
 from api.serializers import (
     VoiceReadSerializer, VoiceWriteSerializer,
@@ -24,7 +24,7 @@ from api.serializers import (
     SessionReadSerializer, SessionWriteSerializer,
     ChatReadSerializer, ChatWriteSerializer,
     SlidesReadSerializer, SlidesWriteSerializer,
-    KnowledgeReadSerializer, KnowledgeWriteSerializer,
+    DocumentReadSerializer, DocumentWriteSerializer,
 )
 
 
@@ -85,8 +85,8 @@ USER_SCOPE_PARAMS = [
 @extend_schema_view(
     list=extend_schema(summary="List voices"),
     retrieve=extend_schema(summary="Retrieve a voice"),
-    create=extend_schema(summary="Create a voice"),
-    update=extend_schema(summary="Update a voice"),
+    create=extend_schema(summary="Create a voice (preview_b64 supported)"),
+    update=extend_schema(summary="Update a voice (preview_b64 supported)"),
     partial_update=extend_schema(summary="Partially update a voice"),
     destroy=extend_schema(summary="Delete a voice"),
 )
@@ -107,8 +107,8 @@ class VoiceViewSet(ReturnReadOnWriteMixin, ModelViewSet):
 @extend_schema_view(
     list=extend_schema(summary="List agents", parameters=USER_SCOPE_PARAMS),
     retrieve=extend_schema(summary="Retrieve an agent by bot_id"),
-    create=extend_schema(summary="Create an agent"),
-    update=extend_schema(summary="Update an agent"),
+    create=extend_schema(summary="Create an agent (avatar_b64 supported)"),
+    update=extend_schema(summary="Update an agent (avatar_b64 supported)"),
     partial_update=extend_schema(summary="Partially update an agent"),
     destroy=extend_schema(summary="Delete an agent"),
 )
@@ -121,8 +121,8 @@ class AgentViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewS
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
     filterset_class = AgentFilter
-    search_fields = ["name", "persona", "voice__name"]
-    ordering_fields = ["created_at", "name", "is_active"]
+    search_fields = ["name", "description", "persona", "voice__name"]
+    ordering_fields = ["created_at", "updated_at", "name", "is_active"]
     user_lookup_field = "user"
 
     read_serializer_class = AgentReadSerializer
@@ -224,42 +224,37 @@ class SlidesViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelView
         return self.scope_to_tenant(super().get_queryset())
 
 
-# ------------------- Knowledge -------------------
+# ------------------- Documents -------------------
 @extend_schema_view(
-    list=extend_schema(summary="List knowledge files (filterable by bot_id/title/mimetype)", parameters=USER_SCOPE_PARAMS),
-    retrieve=extend_schema(summary="Retrieve a knowledge item"),
+    list=extend_schema(summary="List documents (filterable by title/thread_id)", parameters=USER_SCOPE_PARAMS),
+    retrieve=extend_schema(summary="Retrieve a document"),
     create=extend_schema(
-        summary="Upload knowledge (JSON: bot_id, name, file_b64)",
-        description=(
-            "Pass a JSON body: {bot_id: UUID, name: string (optional title), file_b64: base64-encoded file}. "
-            "The owning user is inferred from the Agent (bot_id)."
-        ),
+        summary="Upload document (JSON: thread_id, title, file_b64, title)",
+        description="Uploads a file to a session; extraction runs async via signals.",
     ),
     update=extend_schema(
-        summary="Update knowledge (optionally re-upload)",
-        description=(
-            "You may resend file_b64 to replace the file. If bot_id is provided, the agent may be switched; "
-            "the user is still inferred from the new agent."
-        ),
+        summary="Update document (optionally re-upload)",
+        description="You may resend name+file_b64 to replace the file; you may switch session via thread_id.",
     ),
-    partial_update=extend_schema(summary="Partially update knowledge"),
-    destroy=extend_schema(summary="Delete knowledge"),
+    partial_update=extend_schema(summary="Partially update document"),
+    destroy=extend_schema(summary="Delete document"),
 )
-@extend_schema(tags=["Knowledge"])
-class KnowledgeViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
-    queryset = Knowledge.objects.select_related("user", "agent").all()
+@extend_schema(tags=["Document"])
+class DocumentViewSet(ReturnReadOnWriteMixin, TenantScopedQuerysetMixin, ModelViewSet):
+    queryset = Document.objects.select_related("session", "session__user", "session__agent").all()
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsAuthenticated, HasValidAPIKeyAndAllowedOrigin]
-    filterset_class = KnowledgeFilter
-    search_fields = ["title", "file_name", "mimetype", "agent__name", "agent__bot_id", "sha256"]
-    ordering_fields = ["created_at", "updated_at", "index_status", "mimetype", "size_bytes"]
-    user_lookup_field = "user"
+    filterset_class = DocumentFilter
+    search_fields = ["title", "session__thread_id", "normalized_name", "sha256"]
+    ordering_fields = ["created_at", "updated_at", "index_status"]
+    user_lookup_field = "session__user"
 
-    read_serializer_class = KnowledgeReadSerializer
-    write_serializer_class = KnowledgeWriteSerializer
+    read_serializer_class = DocumentReadSerializer
+    write_serializer_class = DocumentWriteSerializer
 
     def get_queryset(self):
         return self.scope_to_tenant(super().get_queryset())
+
 
 def docView(request):
     """
