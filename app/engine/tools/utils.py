@@ -104,6 +104,21 @@ def _rank_docs(docs: List[Document], query: str) -> List[Document]:
 EditorJS = Dict[str, Any]
 ALLOWED_BLOCK_TYPES = {"header", "paragraph", "list"}
 
+def _bullet_text(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return _strip_ctrl(x).strip()
+    if isinstance(x, dict):
+        for k in ("content", "text", "title", "value"):
+            v = x.get(k)
+            if isinstance(v, str) and v.strip():
+                return _strip_ctrl(v).strip()
+        if isinstance(x.get("items"), list):
+            joined = ", ".join(_bullet_text(i) for i in x["items"])
+            return _strip_ctrl(joined).strip()
+    return _strip_ctrl(f"{x}").strip()
+
 def _coerce_blocks(blocks_any: Any) -> List[Dict[str, Any]]:
     if not isinstance(blocks_any, list):
         return []
@@ -129,7 +144,7 @@ def _coerce_blocks(blocks_any: Any) -> List[Dict[str, Any]]:
             items = d.get("items")
             if not isinstance(items, list):
                 items = []
-            d = {**d, "style": "unordered", "items": [_strip_ctrl(str(x)) for x in items if str(x).strip()]}
+            d = {**d, "style": "unordered", "items": [_bullet_text(i) for i in items if _bullet_text(i)]}
         out.append({"type": t, "data": d})
         if len(out) >= MAX_EDITORJS_BLOCKS:
             break
@@ -176,18 +191,15 @@ def _ensure_single_top_header(blocks: List[Dict[str, Any]], title: Optional[str]
             continue
 
         data = dict(b.get("data") or {})
-        lvl = data.get("level", 2)
         try:
-            lvl = int(lvl)
+            lvl = int(data.get("level", 2))
         except Exception:
             lvl = 2
 
         if not placed_top:
-            # Make the very first header the H2 title
             out.append({"type": "header", "data": {"text": desired_title or _strip_ctrl(data.get("text", "")), "level": 2}})
             placed_top = True
         else:
-            # Demote any subsequent H1/H2 to H3 to keep exactly one H2
             if lvl in (1, 2):
                 lvl = 3
             out.append({"type": "header", "data": {"text": _strip_ctrl(data.get("text", "")), "level": lvl}})
@@ -206,7 +218,6 @@ def _infer_user_from_session(session_id: int) -> Optional[int]:
     return getattr(sess, "user_id", None) if sess else None
 
 async def _ensure_agent_user_from_ctx(ctx: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
-    # Kept for compatibility with other tools; not strictly needed for session-scoped docs.
     agent_id = ctx.get("agent_id")
     user_id = ctx.get("user_id") or ctx.get("owner_user_id") or ctx.get("user")
     if not user_id:
@@ -262,7 +273,6 @@ def _doc_content_snippet(
     return _truncate_text_by_tokens(text, tokens=token_cap)
 
 def _compact_meta_summary(meta: Dict[str, Any] | None) -> str:
-    """Short summary for the tool 'summary' field (caller LLM)."""
     if not isinstance(meta, dict) or not meta:
         return "meta: {}"
     mime = meta.get("mime") or meta.get("mimetype")
@@ -274,7 +284,6 @@ def _compact_meta_summary(meta: Dict[str, Any] | None) -> str:
     except Exception:
         size_kb = None
     stats = meta.get("stats") or {}
-    n_chars = stats.get("num_chars")
     n_words = stats.get("num_words")
     n_lines = stats.get("num_lines")
     kind = (meta.get("structure") or {}).get("kind") or (meta.get("kind"))
@@ -289,10 +298,39 @@ def _compact_meta_summary(meta: Dict[str, Any] | None) -> str:
     return "meta: " + ", ".join(bits[:8])
 
 def _pretty_meta_for_llm(meta: Dict[str, Any] | None, max_len: int = 2000) -> str:
-    """Compact JSON (for analyzer LLM context)."""
     try:
         blob = json.dumps(meta or {}, ensure_ascii=False, separators=(",", ":"), default=str)
     except Exception:
         blob = "{}"
     blob = blob[:max_len]
     return blob
+
+# --- Deck snapshot helpers (ground truth) ---
+def _deck_section_titles(ej: Dict[str, Any]) -> List[str]:
+    blocks = list((ej or {}).get("blocks") or [])
+    out: List[str] = []
+    for b in blocks:
+        if (b.get("type") or "").lower() == "header":
+            try:
+                lvl = int((b.get("data") or {}).get("level", 2))
+            except Exception:
+                lvl = 2
+            if lvl == 3:
+                t = _strip_ctrl(((b.get("data") or {}).get("text") or "")).strip()
+                if t:
+                    out.append(t)
+    return out
+
+def deck_facts_from_snapshot(snap: Dict[str, Any]) -> Dict[str, Any]:
+    ej = (snap or {}).get("editorjs") or {}
+    sections = _deck_section_titles(ej)
+    title = _strip_ctrl(((ej.get("blocks") or [{}])[0].get("data") or {}).get("text") or (snap.get("title") or "")).strip()
+    return {
+        "version": snap.get("version"),
+        "title": title,
+        "updated_at": snap.get("updated_at"),
+        "sections": sections,
+        "section_count": len(sections),
+        "first_section": sections[0] if sections else "",
+        "last_section": sections[-1] if sections else "",
+    }

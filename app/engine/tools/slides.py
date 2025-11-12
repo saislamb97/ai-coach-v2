@@ -13,8 +13,6 @@ from memory.models import Slides, SlidesRevision, _strip_ctrl
 
 from .utils import (
     DB_PRIMARY,
-    DEFAULT_TEXT_MODEL,
-    MAX_SOURCES_PER_ANALYSIS,
     EditorJS,
     get_tool_context,
     normalize_editorjs,
@@ -31,6 +29,16 @@ MIN_SECTION_SLIDES = 3
 MAX_SECTION_SLIDES = 9
 MAX_BULLETS_PER_SECTION = 8
 
+# --------------------------------------------------------------------------------------
+# Summary helpers (multiline bullets everywhere)
+# --------------------------------------------------------------------------------------
+def _bulletize(lines: List[str]) -> str:
+    clean = []
+    for x in lines:
+        s = _strip_ctrl(str(x or "")).strip()
+        if s:
+            clean.append(s)
+    return "\n".join(f"- {s}" for s in clean)
 
 # ======================================================================================
 # Input Schemas
@@ -39,11 +47,8 @@ class SlidesGenerateInput(BaseModel):
     prompt: Optional[str] = Field(None, description="Topic / natural language request for the deck. Creates a new deck.")
     title: Optional[str] = Field(None, description="Deck title (optional; inferred if omitted).")
     summary: Optional[str] = Field(None, description="Short abstract (optional).")
-    editorjs: Optional[EditorJS | List[Dict[str, Any]]] = Field(
-        None, description="(Ignored) Always generates fresh content."
-    )
+    editorjs: Optional[EditorJS | List[Dict[str, Any]]] = Field(None, description="Ignored; always generates fresh content.")
     context: Optional[str] = Field(None, description="Additional context for the deck (optional).")
-    # Upper bound for sections; final total slides = title + 3..9 sections.
     max_sections: int = Field(6, ge=3, le=16)
 
     @field_validator("editorjs")
@@ -80,54 +85,36 @@ class SectionSpec(BaseModel):
 
 class SlidesAddSectionsInput(BaseModel):
     sections: List[SectionSpec] = Field(default_factory=list, description="Sections to add, in order")
-    # Insert new sections AFTER the first section whose header contains this substring (case-insensitive).
-    # If not found or omitted, append at the end.
-    after: Optional[str] = Field(None)
-    # If you pass a single SectionSpec and count > 1, it will duplicate that spec (header gets suffixes).
-    count: int = Field(1, ge=1, le=20, description="How many to add (used with one SectionSpec)")
+    after: Optional[str] = Field(None, description="Insert AFTER first section whose header contains this substring; append if not found.")
+    count: int = Field(1, ge=1, le=20, description="If a single SectionSpec is provided, duplicate it this many times.")
 
 
 class SlidesRemoveSectionsInput(BaseModel):
-    # Remove by substring match (case-insensitive); if omitted, removes from the end.
-    header: Optional[str] = None
-    # Remove at most this many sections (will stop early if the floor would be violated).
+    header: Optional[str] = Field(None, description="Match by substring (case-insensitive). If omitted, remove from end.")
     count: int = Field(1, ge=1, le=20)
-    # If true with a header, will remove all matches up to `count`.
-    all_matches: bool = False
+    all_matches: bool = Field(False, description="If true with a header, remove all matches up to `count`.")
 
 
 class SlidesEditInput(BaseModel):
-    # Optional direct replacement of the entire EditorJS document (must obey section bounds).
     replace_editorjs: Optional[EditorJS | List[Dict[str, Any]]] = None
-
-    # Simple top-level edits
     new_title: Optional[str] = None
     new_summary: Optional[str] = None
 
-    # Targeted section edits (apply in order)
     class SectionEdit(BaseModel):
-        # Identify a section: either by zero-based index or by substring of header (case-insensitive)
         index: Optional[int] = None
         header_icontains: Optional[str] = None
-
-        # Edits
         new_header: Optional[str] = None
-        # Replace all bullets with this list
         new_bullets: Optional[List[str]] = None
-        # Append bullets
         append_bullets: Optional[List[str]] = None
-        # Remove bullets by index positions
         remove_bullets_indices: Optional[List[int]] = None
 
     section_edits: List[SectionEdit] = Field(default_factory=list)
-
 
 # ======================================================================================
 # Helpers (EditorJS)
 # ======================================================================================
 def _ej_blocks(ej: Dict[str, Any]) -> List[Dict[str, Any]]:
     return list((ej or {}).get("blocks") or [])
-
 
 def _is_header(block: Dict[str, Any], level: int) -> bool:
     if (block.get("type") or "").lower() != "header":
@@ -138,26 +125,17 @@ def _is_header(block: Dict[str, Any], level: int) -> bool:
         return False
     return lvl == level
 
-
-def _is_h2_title(block: Dict[str, Any]) -> bool:
-    return _is_header(block, 2)
-
-
 def _is_h3_section_header(block: Dict[str, Any]) -> bool:
     return _is_header(block, 3) and bool(_strip_ctrl((block.get("data") or {}).get("text") or "").strip())
-
 
 def _h_text(block: Dict[str, Any]) -> str:
     return _strip_ctrl(((block.get("data") or {}).get("text") or "")).strip()
 
-
 def _count_sections(blocks: List[Dict[str, Any]]) -> int:
     return sum(1 for b in blocks if _is_h3_section_header(b))
 
-
 def _find_section_indices(blocks: List[Dict[str, Any]]) -> List[int]:
     return [i for i, b in enumerate(blocks) if _is_h3_section_header(b)]
-
 
 def _find_section_by_icontains(blocks: List[Dict[str, Any]], needle: str) -> Optional[int]:
     n = _strip_ctrl(needle or "").lower()
@@ -168,20 +146,31 @@ def _find_section_by_icontains(blocks: List[Dict[str, Any]], needle: str) -> Opt
             return i
     return None
 
-
 def _end_of_section(blocks: List[Dict[str, Any]], start_idx: int) -> int:
-    """
-    Heuristic grouping: H3 header + (optional) immediate paragraph/list after it.
-    """
     j = start_idx
     if j + 1 < len(blocks) and (blocks[j + 1].get("type") or "").lower() in {"list", "paragraph"}:
         j += 1
     return j
 
+def _bullet_text(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return _strip_ctrl(x).strip()
+    if isinstance(x, dict):
+        for k in ("content", "text", "title", "value"):
+            v = x.get(k)
+            if isinstance(v, str) and v.strip():
+                return _strip_ctrl(v).strip()
+        if isinstance(x.get("items"), list):
+            joined = ", ".join(_bullet_text(i) for i in x["items"])
+            return _strip_ctrl(joined).strip()
+    return _strip_ctrl(f"{x}").strip()
 
-def _mk_section_blocks(header: str, bullets: List[str]) -> List[Dict[str, Any]]:
+def _mk_section_blocks(header: str, bullets: List[Any]) -> List[Dict[str, Any]]:
     header = _strip_ctrl(header or "Section")
-    items = [_strip_ctrl(x) for x in (bullets or []) if str(x).strip()][:MAX_BULLETS_PER_SECTION]
+    items = [_bullet_text(b) for b in (bullets or [])]
+    items = [b for b in items if b][:MAX_BULLETS_PER_SECTION]
     if not items:
         items = ["Key point 1", "Key point 2", "Key point 3"]
     return [
@@ -189,15 +178,32 @@ def _mk_section_blocks(header: str, bullets: List[str]) -> List[Dict[str, Any]]:
         {"type": "list", "data": {"style": "unordered", "items": items}},
     ]
 
-
 def _ensure_editorjs(ej_like: EditorJS | List[Dict[str, Any]] | Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Force strict EditorJS format {time,version,blocks}, and ensure exactly one H2 top header.
-    """
     ej = normalize_editorjs(ej_like) if isinstance(ej_like, (dict, list)) else {}
     blocks = _ensure_single_top_header(_ej_blocks(ej), None)
-    return {"time": _now_ms(), "version": "2.x", "blocks": blocks}
 
+    cleaned: List[Dict[str, Any]] = []
+    for b in blocks:
+        t = (b.get("type") or "").lower()
+        d = dict(b.get("data") or {})
+        if t == "list":
+            items = d.get("items") or []
+            if not isinstance(items, list):
+                items = []
+            d["items"] = [x for x in (_bullet_text(i) for i in items) if x]
+            d["style"] = "unordered"
+        elif t == "header":
+            try:
+                lvl = int(d.get("level", 2))
+            except Exception:
+                lvl = 2
+            d["level"] = 2 if cleaned == [] else (lvl if lvl in (1, 2, 3) else 3)
+            d["text"] = _strip_ctrl(d.get("text", ""))
+        elif t == "paragraph":
+            d["text"] = _strip_ctrl(d.get("text", ""))
+        cleaned.append({"type": t, "data": d})
+
+    return {"time": _now_ms(), "version": "2.x", "blocks": cleaned}
 
 def _clamp_section_bounds(blocks: List[Dict[str, Any]]) -> Tuple[bool, str]:
     n = _count_sections(blocks)
@@ -206,7 +212,6 @@ def _clamp_section_bounds(blocks: List[Dict[str, Any]]) -> Tuple[bool, str]:
     if n > MAX_SECTION_SLIDES:
         return False, f"Deck cannot exceed {MAX_SECTION_SLIDES} sections (has {n})."
     return True, ""
-
 
 def _editorjs_stats(ej: Dict[str, Any]) -> Dict[str, Any]:
     h2 = []
@@ -218,7 +223,10 @@ def _editorjs_stats(ej: Dict[str, Any]) -> Dict[str, Any]:
         t = (b.get("type") or "").lower()
         d = b.get("data") or {}
         if t == "header":
-            lvl = int(d.get("level", 2) or 2)
+            try:
+                lvl = int(d.get("level", 2) or 2)
+            except Exception:
+                lvl = 2
             txt = _strip_ctrl(d.get("text") or "")
             if lvl <= 2:
                 h2.append(txt)
@@ -228,9 +236,8 @@ def _editorjs_stats(ej: Dict[str, Any]) -> Dict[str, Any]:
             paragraphs += 1
         elif t == "list":
             items = d.get("items") or []
-            list_items += len([x for x in items if str(x).strip()])
+            list_items += len([_bullet_text(x) for x in items if _bullet_text(x)])
     return {"h2": h2, "h3": h3, "paragraphs": paragraphs, "list_items": list_items, "blocks": len(blocks)}
-
 
 def _summarize_editorjs_diff(old_ej: Dict[str, Any], new_ej: Dict[str, Any]) -> List[str]:
     o = _editorjs_stats(old_ej or {})
@@ -254,7 +261,6 @@ def _summarize_editorjs_diff(old_ej: Dict[str, Any], new_ej: Dict[str, Any]) -> 
         lines.append("Minor text edits; structure unchanged.")
     return lines
 
-
 async def _llm_summarize_change(*, title: str, before_note: str, after_note: str, model: Optional[str] = None) -> str:
     llm = _llm(model=model, temperature=0.2)
     sys = "Summarize in 2–4 short bullets what changed and what the result is. Be concrete."
@@ -264,7 +270,6 @@ async def _llm_summarize_change(*, title: str, before_note: str, after_note: str
         return (getattr(msg, "content", "") or "").strip()[:800]
     except Exception:
         return f"Updated “{title}”. (Summary unavailable.)"
-
 
 # ======================================================================================
 # Slides sync wrappers (ORM in threads)
@@ -277,7 +282,6 @@ def _slides_fetch_latest_sync(session_id: int):
         .order_by("-updated_at", "-id")
         .first()
     )
-
 
 @sync_to_async(thread_sensitive=True)
 def _slides_upsert_sync(session_id: int, *, title: str, summary: str, editorjs: EditorJS, updated_by: str):
@@ -292,12 +296,10 @@ def _slides_upsert_sync(session_id: int, *, title: str, summary: str, editorjs: 
         before_note = f"title={getattr(s, 'title', '')!r}, v={getattr(s, 'version', 0)}" if s else "(none)"
         if not s:
             s = Slides.objects.using(DB_PRIMARY).create(session_id=session_id)
-        # Ensure strict EditorJS and single H2
         ej = _ensure_editorjs(editorjs)
         s.rotate_and_update(title=title or "Untitled Deck", summary=summary or "", editorjs=ej, updated_by=updated_by)
         s.refresh_from_db(using=DB_PRIMARY)
         return s, before_note
-
 
 @sync_to_async(thread_sensitive=True)
 def _slides_revert_sync(session_id: int, version: Optional[int]):
@@ -328,7 +330,6 @@ def _slides_revert_sync(session_id: int, version: Optional[int]):
         s.refresh_from_db(using=DB_PRIMARY)
         return s, before_note, target_version
 
-
 @sync_to_async(thread_sensitive=True)
 def _slides_list_revisions_sync(session_id: int, limit: int = 10):
     return list(
@@ -337,7 +338,6 @@ def _slides_list_revisions_sync(session_id: int, limit: int = 10):
         .order_by("-version")[: max(1, min(50, limit))]
         .values("version", "title", "created_at", "updated_by")
     )
-
 
 @sync_to_async(thread_sensitive=True)
 def _slides_get_revision_sync(session_id: int, version: Optional[int] = None):
@@ -356,21 +356,44 @@ def _slides_get_revision_sync(session_id: int, version: Optional[int] = None):
         s = SlidesRevision.objects.using(DB_PRIMARY).filter(session_id=session_id, version=version).first()
         return s, None
 
-
 # ======================================================================================
-# Formatting
+# Formatting + Return Contract (ONLY: status, summary, data.slides)
 # ======================================================================================
-async def _format_slides_response(s: Slides) -> Dict[str, Any]:
-    # Ensure we return strict EditorJS again (defensive)
-    ej = _ensure_editorjs(s.editorjs or {})
+def _return_ok(slides: Optional[Slides], summary: str) -> Dict[str, Any]:
+    if not slides:
+        return {"status": "ok", "summary": summary, "data": {"slides": {}}}
+    ej = _ensure_editorjs(slides.editorjs or {})
     return {
-        "version": s.version,
-        "title": s.title or "",
-        "summary": s.summary or "",
-        "editorjs": ej,
-        "updated_at": s.updated_at.isoformat(),
+        "status": "ok",
+        "summary": summary,
+        "data": {
+            "slides": {
+                "version": slides.version,
+                "title": slides.title or "",
+                "summary": slides.summary or "",
+                "editorjs": ej,
+                "updated_at": slides.updated_at.isoformat(),
+            }
+        },
     }
 
+def _return_failed(slides: Optional[Slides], summary: str) -> Dict[str, Any]:
+    if not slides:
+        return {"status": "failed", "summary": summary, "data": {"slides": {}}}
+    ej = _ensure_editorjs(slides.editorjs or {})
+    return {
+        "status": "failed",
+        "summary": summary,
+        "data": {
+            "slides": {
+                "version": slides.version,
+                "title": slides.title or "",
+                "summary": slides.summary or "",
+                "editorjs": ej,
+                "updated_at": slides.updated_at.isoformat(),
+            }
+        },
+    }
 
 # ======================================================================================
 # Outline generation
@@ -399,7 +422,6 @@ def _fallback_sections_from_text(context: str, need_n: int) -> List[Dict[str, An
         while len(seeds) < need_n:
             seeds += default_pad
     return [{"header": h, "bullets": bs[:MAX_BULLETS_PER_SECTION]} for (h, bs) in seeds[:need_n]]
-
 
 async def _llm_outline_to_editorjs(
     *,
@@ -438,38 +460,149 @@ async def _llm_outline_to_editorjs(
 
         for s in sections:
             hdr = _strip_ctrl((s.get("header") or "").strip()) or "Section"
-            bullets = [_strip_ctrl(str(x)) for x in (s.get("bullets") or []) if str(x).strip()][:MAX_BULLETS_PER_SECTION]
+            bullets_raw = s.get("bullets") or []
+            bullets = [_bullet_text(x) for x in bullets_raw]
+            bullets = [b for b in bullets if b][:MAX_BULLETS_PER_SECTION]
             blocks.append({"type": "header", "data": {"text": hdr, "level": 3}})
             blocks.append({"type": "list", "data": {"style": "unordered", "items": bullets}})
 
         ej = _ensure_editorjs({"time": _now_ms(), "version": "2.x", "blocks": blocks})
         return ej or minimal_editorjs(title, summary)
     except Exception:
-        # deterministic fallback (title + 3 sections)
         title = (prompt or "Untitled Deck").strip()[:140] or "Untitled Deck"
         sections = _fallback_sections_from_text(context, MIN_SECTION_SLIDES)
         blocks = [{"type": "header", "data": {"text": _strip_ctrl(title), "level": 2}}]
         for s in sections:
-            blocks.append({"type": "header", "data": {"text": _strip_ctrl(s["header"]), "level": 3}})
-            blocks.append({"type": "list", "data": {"style": "unordered", "items": [_strip_ctrl(x) for x in s["bullets"][:MAX_BULLETS_PER_SECTION]]}})
+            blocks.extend(_mk_section_blocks(_strip_ctrl(s["header"]), s["bullets"][:MAX_BULLETS_PER_SECTION]))
         return {"time": _now_ms(), "version": "2.x", "blocks": blocks}
 
+# ======================================================================================
+# Local EditorJS edit helpers
+# ======================================================================================
+def _insert_sections(blocks: List[Dict[str, Any]], sections: List[SectionSpec], after: Optional[str], count: int) -> List[Dict[str, Any]]:
+    to_add: List[Dict[str, Any]] = []
+    if len(sections) == 1 and count > 1:
+        base = sections[0]
+        for i in range(count):
+            suffix = f" ({i+1})" if i > 0 else ""
+            to_add.extend(_mk_section_blocks(base.header + suffix, base.bullets))
+    else:
+        for s in sections:
+            to_add.extend(_mk_section_blocks(s.header, s.bullets))
+
+    if not to_add:
+        return blocks
+
+    insert_at = None
+    if after:
+        idx = _find_section_by_icontains(blocks, after)
+        if idx is not None:
+            insert_at = _end_of_section(blocks, idx) + 1
+
+    if insert_at is None:
+        secs = _find_section_indices(blocks)
+        insert_at = _end_of_section(blocks, secs[-1]) + 1 if secs else len(blocks)
+
+    return blocks[:insert_at] + to_add + blocks[insert_at:]
+
+def _remove_sections(blocks: List[Dict[str, Any]], header: Optional[str], count: int, all_matches: bool) -> List[Dict[str, Any]]:
+    indices = _find_section_indices(blocks)
+    if not indices:
+        return blocks
+
+    targets: List[int] = []
+    if header:
+        h = _strip_ctrl(header).lower()
+        for i in indices:
+            if h in _h_text(blocks[i]).lower():
+                targets.append(i)
+                if not all_matches and len(targets) >= count:
+                    break
+        if all_matches:
+            targets = targets[:count]
+    else:
+        targets = list(reversed(indices))[:count]
+
+    if not targets:
+        return blocks
+
+    targets = sorted(set(targets))
+    new_blocks = blocks[:]
+    for idx in reversed(targets):
+        remaining_sections = _count_sections(new_blocks) - 1
+        if remaining_sections < MIN_SECTION_SLIDES:
+            continue
+        end = _end_of_section(new_blocks, idx)
+        del new_blocks[idx : end + 1]
+
+    return new_blocks
+
+def _find_list_after_section(blocks: List[Dict[str, Any]], sec_idx: int) -> Optional[int]:
+    j = sec_idx + 1
+    if j < len(blocks) and (blocks[j].get("type") or "").lower() == "list":
+        return j
+    return None
+
+def _apply_section_edit(blocks: List[Dict[str, Any]], edit: SlidesEditInput.SectionEdit) -> List[Dict[str, Any]]:
+    indices = _find_section_indices(blocks)
+    if not indices:
+        return blocks
+
+    target_idx: Optional[int] = None
+    if edit.index is not None:
+        if 0 <= edit.index < len(indices):
+            target_idx = indices[edit.index]
+    elif edit.header_icontains:
+        target_idx = _find_section_by_icontains(blocks, edit.header_icontains)
+
+    if target_idx is None:
+        return blocks
+
+    if edit.new_header is not None:
+        blocks[target_idx] = {"type": "header", "data": {"text": _strip_ctrl(edit.new_header), "level": 3}}
+
+    need_bullet_change = (edit.new_bullets is not None) or (edit.append_bullets is not None) or (edit.remove_bullets_indices is not None)
+    list_idx = _find_list_after_section(blocks, target_idx)
+    if need_bullet_change and list_idx is None:
+        list_idx = target_idx + 1
+        blocks.insert(list_idx, {"type": "list", "data": {"style": "unordered", "items": []}})
+
+    if list_idx is not None:
+        items = list((blocks[list_idx].get("data") or {}).get("items") or [])
+        if edit.new_bullets is not None:
+            items = [_bullet_text(x) for x in (edit.new_bullets or []) if _bullet_text(x)]
+        if edit.append_bullets is not None:
+            items += [_bullet_text(x) for x in (edit.append_bullets or []) if _bullet_text(x)]
+        if edit.remove_bullets_indices:
+            for i in sorted(set(edit.remove_bullets_indices), reverse=True):
+                if 0 <= i < len(items):
+                    del items[i]
+        items = [x for x in items if x][:MAX_BULLETS_PER_SECTION]
+        blocks[list_idx] = {"type": "list", "data": {"style": "unordered", "items": items}}
+
+    return blocks
 
 # ======================================================================================
-# Tools
+# Tools (STRICT RETURN: only status, summary, data.slides) — with MULTILINE bullet summaries
 # ======================================================================================
-def _standard_return(status: str, summary: str, slides: Optional[Slides]) -> Dict[str, Any]:
-    data = {}
-    if slides:
-        data = {"slides": {"version": slides.version, "title": slides.title or "", "summary": slides.summary or "", "editorjs": _ensure_editorjs(slides.editorjs or {}), "updated_at": slides.updated_at.isoformat()}}
-    return {"status": status, "summary": summary, "data": data}
+@tool("slides_fetch", args_schema=FetchSlidesInput, description="Fetch the latest slides.")
+async def slides_fetch() -> Dict[str, Any]:
+    ctx = get_tool_context()
+    session_id = ctx.get("session_id")
+    if not session_id:
+        return _return_failed(None, _bulletize(["Missing session context."]))
+
+    s = await _slides_fetch_latest_sync(int(session_id))
+    if not s:
+        return _return_ok(None, _bulletize(["No slides found.", "Share a topic to create a deck."]))
+    return _return_ok(s, _bulletize([
+        f"Fetched latest v{s.version}.",
+        f"Updated: {s.updated_at.isoformat()}",
+        f"Title: {s.title or 'Untitled Deck'}",
+    ]))
 
 
-@tool(
-    "slides_generate_or_update",
-    args_schema=SlidesGenerateInput,
-    description="Create a brand-new deck (title + 3..9 sections). Rotates previous into SlidesRevision. Returns {status, summary, data.slides}."
-)
+@tool("slides_generate_or_update", args_schema=SlidesGenerateInput, description="Generate a new deck (title + 3..9 sections). Rotates version.")
 async def slides_generate_or_update(
     prompt: Optional[str] = None,
     title: Optional[str] = None,
@@ -481,415 +614,215 @@ async def slides_generate_or_update(
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
+        return _return_failed(None, _bulletize(["Missing session context."]))
 
-    prompt_clean = _strip_ctrl((prompt or "").strip())
-    title_clean = _strip_ctrl((title or "").strip())
+    seed = _strip_ctrl((title or prompt or "Untitled Deck").strip())
     summary_clean = _strip_ctrl((summary or "").strip())
     context_clean = _strip_ctrl((context or "").strip())
 
-    seed = title_clean or prompt_clean or "Untitled Deck"
     ej = await _llm_outline_to_editorjs(prompt=seed, context=context_clean, max_sections=max_sections)
-
-    # Keep H2 stable and strict EJ
-    if ej and ej.get("blocks"):
-        ej = _ensure_editorjs({"time": _now_ms(), "version": "2.x", "blocks": _ensure_single_top_header(ej["blocks"], title_clean or None)})
-    else:
-        ej = minimal_editorjs(title_clean or (prompt_clean[:80] if prompt_clean else "Untitled Deck"), summary_clean or "")
-
-    # Bounds check
-    ok, reason = _clamp_section_bounds(_ej_blocks(ej))
+    ej = _ensure_editorjs(ej)
+    ok, msg = _clamp_section_bounds(_ej_blocks(ej))
     if not ok:
-        return _standard_return("failed", f"Cannot generate deck: {reason}", None)
+        return _return_failed(None, _bulletize(["Invalid deck.", msg]))
 
-    try:
-        s, before_note = await _slides_upsert_sync(
-            session_id,
-            title=(title_clean or (_ej_blocks(ej)[0]["data"]["text"] if _ej_blocks(ej) else "Untitled Deck")),
-            summary=summary_clean or "",
-            editorjs=ej,
-            updated_by="tool:slides_generate_or_update:new_deck",
-        )
-        latest, prev = await _slides_get_revision_sync(session_id, None)
-        changes: List[str] = []
-        if prev:
-            try:
-                changes = _summarize_editorjs_diff(prev.editorjs or {}, latest.editorjs or {})
-            except Exception:
-                changes = []
-        after_note = f"title={s.title!r}, v={s.version}"
-        llm_summary = await _llm_summarize_change(
-            title=s.title or "Deck",
-            before_note=(f"title={getattr(prev, 'title', '')!r}, v={getattr(prev, 'version', 0)}") if prev else "(none)",
-            after_note=after_note,
-        )
-        if prev and changes:
-            summary_out = f"{llm_summary}\n- " + "\n- ".join(changes[:6])
-        elif prev:
-            summary_out = f"{llm_summary}"
-        else:
-            summary_out = f"Created new deck v{s.version} titled “{s.title or 'Untitled Deck'}”."
-        return _standard_return("ok", summary_out, s)
-    except Exception as e:
-        log.exception("[slides_generate_or_update] persist error")
-        return _standard_return("failed", f"Failed to save slides: {e}", None)
+    s, _ = await _slides_upsert_sync(
+        int(session_id),
+        title=ej["blocks"][0]["data"]["text"] if ej["blocks"] else seed,
+        summary=summary_clean,
+        editorjs=ej,
+        updated_by="tool:slides_generate_or_update",
+    )
+    stats = _editorjs_stats(ej)
+    return _return_ok(
+        s,
+        _bulletize([
+            f"Created/updated deck v{s.version}.",
+            f"Title: {s.title or 'Untitled Deck'}",
+            f"Sections: {len(stats.get('h3', []))}",
+        ]),
+    )
 
-
-@tool(
-    "slides_fetch_latest",
-    args_schema=FetchSlidesInput,
-    description="Fetch the latest slides. Returns {status, summary, data.slides}."
-)
-async def slides_fetch_latest() -> Dict[str, Any]:
-    ctx = get_tool_context()
-    session_id = ctx.get("session_id")
-    if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
-    try:
-        s = await _slides_fetch_latest_sync(session_id)
-    except Exception as e:
-        log.exception("[slides_fetch_latest] db error")
-        return _standard_return("failed", f"DB error: {e}", None)
-    if not s:
-        return _standard_return("not_found", "No slide deck exists yet.", None)
-    return _standard_return("ok", f"Fetched deck v{s.version} titled “{s.title or 'Untitled Deck'}”.", s)
-
-
-@tool(
-    "slides_list_versions",
-    args_schema=SlidesListVersionsInput,
-    description="List recent slide versions; also returns latest deck. Returns {status, summary, data:{slides,versions}}."
-)
+@tool("slides_list_versions", args_schema=SlidesListVersionsInput, description="List version count (no payload, only latest slides returned).")
 async def slides_list_versions(limit: int = 10) -> Dict[str, Any]:
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
-    rows = await _slides_list_revisions_sync(session_id, limit=limit)
-    latest = await _slides_fetch_latest_sync(session_id)
-    if not rows:
-        return {"status": "not_found", "summary": "No versions found.", "data": {"slides": (await _format_slides_response(latest)) if latest else None, "versions": []}}
-    titles = ", ".join([f"v{r['version']}:{r['title'] or 'Untitled'}" for r in rows[:5]])
-    return {"status": "ok", "summary": f"Found {len(rows)} version(s): {titles}.", "data": {"slides": await _format_slides_response(latest) if latest else None, "versions": rows}}
+        return _return_failed(None, _bulletize(["Missing session context."]))
 
+    s = await _slides_fetch_latest_sync(int(session_id))
+    versions = await _slides_list_revisions_sync(int(session_id), limit=limit)
+    if not s:
+        return _return_ok(None, _bulletize([f"No slides found.", f"{len(versions)} revision(s) exist for this session."]))
+    return _return_ok(s, _bulletize([f"Found {len(versions)} revision(s).", f"Latest: v{s.version}."]))
 
-@tool(
-    "slides_diff_latest",
-    args_schema=SlidesDiffInput,
-    description="Summarize differences between latest slides and a previous version (or previous by default). Returns {status, summary, data:{slides,from_version,to_version,changes}}."
-)
-async def slides_diff_latest(compare_to_version: Optional[int] = None) -> Dict[str, Any]:
-    ctx = get_tool_context()
-    session_id = ctx.get("session_id")
-    if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
-    try:
-        latest = await _slides_fetch_latest_sync(session_id)
-        if not latest:
-            return {"status": "not_found", "summary": "No slide deck exists yet.", "data": {}}
-        if compare_to_version is None:
-            _, prev = await _slides_get_revision_sync(session_id, None)
-        else:
-            prev, _ = await _slides_get_revision_sync(session_id, compare_to_version)
-        if not prev:
-            return {"status": "not_found", "summary": "No previous version to compare against.", "data": {"slides": await _format_slides_response(latest)}}
-        changes = _summarize_editorjs_diff(prev.editorjs or {}, latest.editorjs or {})
-        summary_out = f"Compared v{latest.version} to v{prev.version}.\n- " + "\n- ".join(changes[:6])
-        return {"status": "ok", "summary": summary_out, "data": {"slides": await _format_slides_response(latest), "from_version": prev.version, "to_version": latest.version, "changes": changes}}
-    except Exception as e:
-        log.exception("[slides_diff_latest] error")
-        return {"status": "failed", "summary": f"Failed to diff slides: {e}", "data": {}}
-
-
-@tool(
-    "slides_revert",
-    args_schema=SlidesRevertInput,
-    description="Revert slides to a specific version (or previous if not provided). Returns {status, summary, data.slides}."
-)
+@tool("slides_revert", args_schema=SlidesRevertInput, description="Revert to a previous version (or previous if omitted).")
 async def slides_revert(version: Optional[int] = None) -> Dict[str, Any]:
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
+        return _return_failed(None, _bulletize(["Missing session context."]))
+
+    current = await _slides_fetch_latest_sync(int(session_id))
+    if not current:
+        return _return_failed(None, _bulletize(["No slides found to revert."]))
+
     try:
-        s, before_note, target_version = await _slides_revert_sync(session_id, version)
-        after_note = f"title={s.title!r}, v={s.version}"
-        summary_out = await _llm_summarize_change(
-            title=s.title or "Deck",
-            before_note=before_note,
-            after_note=f"Reverted to v{target_version}; now {after_note}",
-        )
-        return _standard_return("ok", summary_out, s)
-    except ValueError as ve:
-        return _standard_return("failed", str(ve), None)
+        s, _before, target_version = await _slides_revert_sync(int(session_id), version)
     except Exception as e:
-        log.exception("[slides_revert] db error")
-        return _standard_return("failed", f"Failed to revert: {e}", None)
+        return _return_failed(current, _bulletize([f"Revert failed: {e}"]))
 
+    return _return_ok(s, _bulletize([f"Reverted to v{target_version}.", f"Current version: v{s.version}."]))
 
-# === Add sections =====================================================================
-@tool(
-    "slides_add_sections",
-    args_schema=SlidesAddSectionsInput,
-    description="Add 1..N sections (H3 + bullets). Enforces 3..9 sections. Returns {status, summary, data.slides}."
-)
-async def slides_add_sections(sections: List[SectionSpec] = [], after: Optional[str] = None, count: int = 1) -> Dict[str, Any]:
+@tool("slides_diff", args_schema=SlidesDiffInput, description="Compare latest to a previous version (or previous by default).")
+async def slides_diff(compare_to_version: Optional[int] = None) -> Dict[str, Any]:
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
+        return _return_failed(None, _bulletize(["Missing session context."]))
 
-    s = await _slides_fetch_latest_sync(session_id)
-    if not s:
-        return _standard_return("not_found", "No slide deck exists yet.", None)
+    current = await _slides_fetch_latest_sync(int(session_id))
+    if not current:
+        return _return_ok(None, _bulletize(["No slides found.", "Share a topic to create a deck."]))
 
-    old_ej = _ensure_editorjs(s.editorjs or {})
-    blocks = _ej_blocks(old_ej)
-    current = _count_sections(blocks)
-    if current >= MAX_SECTION_SLIDES:
-        msg = (
-            f"Section limit reached ({MAX_SECTION_SLIDES}). "
-            "I can remove a section and then add a new one—would you like me to remove one? "
-            "Specify a header substring or index."
-        )
-        return _standard_return("blocked", msg, s)
-
-    insert_at = len(blocks)
-    if after:
-        idx = _find_section_by_icontains(blocks, after)
-        if idx is not None:
-            insert_at = _end_of_section(blocks, idx) + 1
-
-    to_add: List[SectionSpec] = list(sections or [])
-    if not to_add and count > 0:
-        # Nothing to add; default to a single blank section spec repeated
-        to_add = [SectionSpec(header="New Section", bullets=[])]
-    if len(to_add) == 1 and count > 1:
-        base = to_add[0]
-        for i in range(2, count + 1):
-            to_add.append(SectionSpec(header=f"{base.header} {i}", bullets=base.bullets))
-
-    remaining = MAX_SECTION_SLIDES - current
-    if len(to_add) > remaining:
-        # Partial add up to the remaining capacity
-        kept = to_add[:remaining]
-        dropped = len(to_add) - len(kept)
-        to_add = kept
-        partial_note = f"Added {len(kept)} section(s); {dropped} not added due to the {MAX_SECTION_SLIDES}-section cap."
+    if compare_to_version is None:
+        _, prev = await _slides_get_revision_sync(int(session_id), None)
+        base = prev
     else:
-        partial_note = ""
+        base, _ = await _slides_get_revision_sync(int(session_id), int(compare_to_version))
 
-    for spec in to_add:
-        new = _mk_section_blocks(spec.header, spec.bullets)
-        blocks[insert_at:insert_at] = new
-        insert_at += len(new)
+    ej_current = _ensure_editorjs(current.editorjs or {})
+    ej_base = _ensure_editorjs((getattr(base, "editorjs", None) or {}) or {})
+    lines = _summarize_editorjs_diff(ej_base, ej_current)
+    base_v = getattr(base, "version", current.version - 1 if current.version else None)
 
-    # Final bounds check
-    ok, reason = _clamp_section_bounds(blocks)
+    summary = _bulletize([f"Compared v{current.version} to v{base_v if base_v is not None else 'N/A'}"] + lines)
+    return _return_ok(current, summary)
+
+@tool("slides_add_sections", args_schema=SlidesAddSectionsInput, description="Add sections (H3 + bullets).")
+async def slides_add_sections(sections: List[SectionSpec], after: Optional[str] = None, count: int = 1) -> Dict[str, Any]:
+    ctx = get_tool_context()
+    session_id = ctx.get("session_id")
+    if not session_id:
+        return _return_failed(None, _bulletize(["Missing session context."]))
+
+    s = await _slides_fetch_latest_sync(int(session_id))
+    if not s:
+        return _return_ok(None, _bulletize(["No slides found.", "Share a topic to create a deck."]))
+
+    before_ej = _ensure_editorjs(s.editorjs or {})
+    blocks = _ej_blocks(before_ej)
+    before_n = _count_sections(blocks)
+
+    new_blocks = _insert_sections(blocks, sections, after, count)
+    ok, msg = _clamp_section_bounds(new_blocks)
     if not ok:
-        return _standard_return("failed", f"Cannot add sections: {reason}", s)
+        return _return_failed(s, _bulletize(["Not applied.", msg]))
 
-    updated_ej = _ensure_editorjs({"time": _now_ms(), "version": "2.x", "blocks": _ensure_single_top_header(blocks, s.title or None)})
-    s2, before_note = await _slides_upsert_sync(
-        session_id,
-        title=s.title or "Untitled Deck",
-        summary=s.summary or "",
-        editorjs=updated_ej,
+    after_n = _count_sections(new_blocks)
+    added_n = max(0, after_n - before_n)
+
+    new_ej = {"time": _now_ms(), "version": "2.x", "blocks": new_blocks}
+    s2, _ = await _slides_upsert_sync(
+        int(session_id),
+        title=_h_text(new_blocks[0]) if new_blocks else s.title,
+        summary=s.summary,
+        editorjs=new_ej,
         updated_by="tool:slides_add_sections",
     )
+    return _return_ok(s2, _bulletize([f"Added {added_n} section(s).", f"Now {after_n} section(s) total."]))
 
-    changes = _summarize_editorjs_diff(old_ej or {}, s2.editorjs or {})
-    llm_note = await _llm_summarize_change(
-        title=s2.title or "Deck",
-        before_note=before_note,
-        after_note=f"Added {len(to_add)} section(s); now title={s2.title!r}, v={s2.version}",
-    )
-    summary_out = (llm_note + (("\n" + partial_note) if partial_note else "") + ("\n- " + "\n- ".join(changes[:6]) if changes else "")).strip()
-    return _standard_return("ok", summary_out, s2)
-
-
-# === Remove sections ==================================================================
-@tool(
-    "slides_remove_sections",
-    args_schema=SlidesRemoveSectionsInput,
-    description="Remove up to N sections by header substring (or from the end). Enforces floor of 3 sections. Returns {status, summary, data.slides}."
-)
+@tool("slides_remove_sections", args_schema=SlidesRemoveSectionsInput, description="Remove sections by match or from end.")
 async def slides_remove_sections(header: Optional[str] = None, count: int = 1, all_matches: bool = False) -> Dict[str, Any]:
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
+        return _return_failed(None, _bulletize(["Missing session context."]))
 
-    s = await _slides_fetch_latest_sync(session_id)
+    s = await _slides_fetch_latest_sync(int(session_id))
     if not s:
-        return _standard_return("not_found", "No slide deck exists yet.", None)
+        return _return_ok(None, _bulletize(["No slides found.", "Share a topic to create a deck."]))
 
-    old_ej = _ensure_editorjs(s.editorjs or {})
-    blocks = _ej_blocks(old_ej)
-    section_idxs = _find_section_indices(blocks)
-    if not section_idxs:
-        return _standard_return("not_found", "No sections to remove.", s)
+    before_ej = _ensure_editorjs(s.editorjs or {})
+    blocks = _ej_blocks(before_ej)
+    before_n = _count_sections(blocks)
 
-    removed_titles: List[str] = []
-    removed = 0
+    new_blocks = _remove_sections(blocks, header, count, all_matches)
+    if new_blocks == blocks:
+        return _return_ok(s, _bulletize(["No sections removed."]))
 
-    def _remove_at(blks: List[Dict[str, Any]], idx: int) -> List[Dict[str, Any]]:
-        end = _end_of_section(blks, idx)
-        removed_titles.append(_h_text(blks[idx]))
-        return blks[:idx] + blks[end + 1:]
-
-    while removed < count:
-        current_n = _count_sections(blocks)
-        if current_n <= MIN_SECTION_SLIDES:
-            break  # floor reached
-        if header:
-            idx = _find_section_by_icontains(blocks, header)
-            if idx is None:
-                break
-            blocks = _remove_at(blocks, idx)
-            removed += 1
-            if not all_matches:
-                break
-        else:
-            idxs = _find_section_indices(blocks)
-            if not idxs:
-                break
-            blocks = _remove_at(blocks, idxs[-1])
-            removed += 1
-
-    if removed == 0:
-        msg = "No matching section found to remove." if header else f"Cannot remove: deck is at the minimum of {MIN_SECTION_SLIDES} sections."
-        return _standard_return("blocked", msg, s)
-
-    ok, reason = _clamp_section_bounds(blocks)
+    ok, msg = _clamp_section_bounds(new_blocks)
     if not ok:
-        return _standard_return("failed", f"Cannot remove sections: {reason}", s)
+        return _return_failed(s, _bulletize(["Not applied.", msg]))
 
-    updated_ej = _ensure_editorjs({"time": _now_ms(), "version": "2.x", "blocks": _ensure_single_top_header(blocks, s.title or None)})
-    s2, before_note = await _slides_upsert_sync(
-        session_id,
-        title=s.title or "Untitled Deck",
-        summary=s.summary or "",
-        editorjs=updated_ej,
+    after_n = _count_sections(new_blocks)
+    removed_n = max(0, before_n - after_n)
+
+    new_ej = {"time": _now_ms(), "version": "2.x", "blocks": new_blocks}
+    s2, _ = await _slides_upsert_sync(
+        int(session_id),
+        title=_h_text(new_blocks[0]) if new_blocks else s.title,
+        summary=s.summary,
+        editorjs=new_ej,
         updated_by="tool:slides_remove_sections",
     )
+    return _return_ok(s2, _bulletize([f"Removed {removed_n} section(s).", f"Now {after_n} section(s) total."]))
 
-    changes = _summarize_editorjs_diff(old_ej or {}, s2.editorjs or {})
-    removed_label = ", ".join([f"“{t}”" for t in removed_titles[:3]]) + ("…" if len(removed_titles) > 3 else "")
-    llm_note = await _llm_summarize_change(
-        title=s2.title or "Deck",
-        before_note=before_note,
-        after_note=f"Removed {removed} section(s) {removed_label}; now title={s2.title!r}, v={s2.version}",
-    )
-    summary_out = (llm_note + ("\n- " + "\n- ".join(changes[:6]) if changes else "")).strip()
-    return _standard_return("ok", summary_out, s2)
-
-
-# === Edit deck (title/summary/sections/whole blocks) ==================================
-@tool(
-    "slides_edit",
-    args_schema=SlidesEditInput,
-    description=(
-        "Edit title/summary and/or specific sections (rename/replace bullets/append/remove bullets), "
-        "or replace the entire editorjs document. Enforces 3..9 sections. Returns {status, summary, data.slides}."
-    ),
-)
+@tool("slides_edit", args_schema=SlidesEditInput, description="Replace whole EditorJS or apply targeted section edits.")
 async def slides_edit(
     replace_editorjs: Optional[EditorJS | List[Dict[str, Any]]] = None,
     new_title: Optional[str] = None,
     new_summary: Optional[str] = None,
     section_edits: List[SlidesEditInput.SectionEdit] = [],
 ) -> Dict[str, Any]:
+
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return _standard_return("failed", "Missing session context.", None)
+        return _return_failed(None, _bulletize(["Missing session context."]))
 
-    s = await _slides_fetch_latest_sync(session_id)
+    s = await _slides_fetch_latest_sync(int(session_id))
     if not s:
-        return _standard_return("not_found", "No slide deck exists yet.", None)
+        return _return_ok(None, _bulletize(["No slides found.", "Share a topic to create a deck."]))
+
+    before_ej = _ensure_editorjs(s.editorjs or {})
+    blocks = _ej_blocks(before_ej)
 
     if replace_editorjs is not None:
-        ej = _ensure_editorjs(replace_editorjs)
-        blocks = _ej_blocks(ej)
+        candidate = _ensure_editorjs(replace_editorjs)
+        ok, msg = _clamp_section_bounds(_ej_blocks(candidate))
+        if not ok:
+            return _return_failed(s, _bulletize(["Not applied.", msg]))
+        new_ej = candidate
+        new_title_final = _h_text(_ej_blocks(candidate)[0]) if _ej_blocks(candidate) else (new_title or s.title)
+        new_summary_final = new_summary if new_summary is not None else s.summary
     else:
-        ej = _ensure_editorjs(s.editorjs or {})
-        blocks = _ej_blocks(ej)
+        if new_title is not None and blocks:
+            blocks[0] = {"type": "header", "data": {"text": _strip_ctrl(new_title), "level": 2}}
+        if new_summary is not None:
+            if len(blocks) >= 2 and (blocks[1].get("type") or "").lower() == "paragraph":
+                blocks[1] = {"type": "paragraph", "data": {"text": _strip_ctrl(new_summary)}}
+            else:
+                blocks = blocks[:1] + [{"type": "paragraph", "data": {"text": _strip_ctrl(new_summary)}}] + blocks[1:]
 
-    # Title/summary edits
-    title_out = _strip_ctrl(new_title) if (new_title is not None) else (s.title or "")
-    summary_out = _strip_ctrl(new_summary) if (new_summary is not None) else (s.summary or "")
+        for ed in section_edits or []:
+            blocks = _apply_section_edit(blocks, ed)
 
-    # Ensure first block is H2 with desired title
-    blocks = _ensure_single_top_header(blocks, title_out or None)
+        ok, msg = _clamp_section_bounds(blocks)
+        if not ok:
+            return _return_failed(s, _bulletize(["Not applied.", msg]))
+        new_ej = {"time": _now_ms(), "version": "2.x", "blocks": blocks}
+        new_title_final = _h_text(blocks[0]) if blocks else (new_title or s.title)
+        new_summary_final = new_summary if new_summary is not None else s.summary
 
-    # Targeted section edits
-    for edit in section_edits or []:
-        # Locate target
-        idx = None
-        if edit.index is not None:
-            sec_idxs = _find_section_indices(blocks)
-            if 0 <= edit.index < len(sec_idxs):
-                idx = sec_idxs[edit.index]
-        elif edit.header_icontains:
-            idx = _find_section_by_icontains(blocks, edit.header_icontains)
+    new_ej = _ensure_editorjs(new_ej)
+    diff_lines = _summarize_editorjs_diff(before_ej, new_ej)
 
-        if idx is None:
-            # skip silently (could also summarize that a target wasn't found)
-            continue
-
-        # Rename header
-        if edit.new_header is not None:
-            if _is_h3_section_header(blocks[idx]):
-                blocks[idx] = {"type": "header", "data": {"text": _strip_ctrl(edit.new_header), "level": 3}}
-
-        # Operate on the block after header if it's a list
-        end = _end_of_section(blocks, idx)
-        if idx + 1 <= end and (blocks[idx + 1].get("type") or "").lower() == "list":
-            items = [(x if isinstance(x, str) else str(x)) for x in (blocks[idx + 1].get("data", {}).get("items") or [])]
-        else:
-            items = []
-
-        # Replace bullets
-        if edit.new_bullets is not None:
-            items = [_strip_ctrl(x) for x in edit.new_bullets][:MAX_BULLETS_PER_SECTION]
-
-        # Append bullets
-        if edit.append_bullets:
-            for b in edit.append_bullets:
-                if len(items) >= MAX_BULLETS_PER_SECTION:
-                    break
-                if str(b).strip():
-                    items.append(_strip_ctrl(b))
-
-        # Remove bullets by indices
-        if edit.remove_bullets_indices:
-            keep = [x for i, x in enumerate(items) if i not in set(edit.remove_bullets_indices)]
-            items = keep[:MAX_BULLETS_PER_SECTION]
-
-        # Write back bullets (ensure there's a list block)
-        if idx + 1 <= end and (blocks[idx + 1].get("type") or "").lower() == "list":
-            blocks[idx + 1] = {"type": "list", "data": {"style": "unordered", "items": items[:MAX_BULLETS_PER_SECTION]}}
-        else:
-            # insert a new list right after header
-            blocks = blocks[:idx + 1] + [{"type": "list", "data": {"style": "unordered", "items": items[:MAX_BULLETS_PER_SECTION]}}] + blocks[idx + 1:]
-
-    # Bounds check (sections count must be within 3..9)
-    ok, reason = _clamp_section_bounds(blocks)
-    if not ok:
-        return _standard_return("failed", f"Edit would violate bounds: {reason}", s)
-
-    updated_ej = _ensure_editorjs({"time": _now_ms(), "version": "2.x", "blocks": blocks})
-    s2, before_note = await _slides_upsert_sync(
-        session_id,
-        title=title_out or "Untitled Deck",
-        summary=summary_out or "",
-        editorjs=updated_ej,
+    s2, _ = await _slides_upsert_sync(
+        int(session_id),
+        title=new_title_final or s.title,
+        summary=new_summary_final or "",
+        editorjs=new_ej,
         updated_by="tool:slides_edit",
     )
-
-    changes = _summarize_editorjs_diff(ej or {}, s2.editorjs or {})
-    after_note = f"title={s2.title!r}, v={s2.version}"
-    llm_note = await _llm_summarize_change(title=s2.title or "Deck", before_note=before_note, after_note=after_note)
-    summary_out = (llm_note + ("\n- " + "\n- ".join(changes[:6]) if changes else "")).strip()
-    return _standard_return("ok", summary_out, s2)
+    return _return_ok(s2, _bulletize(["Edited slides."] + diff_lines))

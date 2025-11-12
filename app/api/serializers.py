@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.core.files.base import ContentFile
 from rest_framework import serializers
-
+from django.shortcuts import get_object_or_404
 from agent.models import Voice, Agent
 from memory.models import Session, Chat, Slides, Document
 
@@ -34,8 +34,13 @@ class CoercingJSONField(serializers.JSONField):
                 raise serializers.ValidationError("Invalid JSON: expected object/array or a valid JSON string.")
             return super().to_internal_value(data)
         return super().to_internal_value(data)
+    
+    def to_representation(self, value):
+        # ensure dict/list go out as JSON-compatible objects
+        return super().to_representation(value)
 
 _DATA_URI_HEADER_RE = re.compile(r"^data:([^;,]+)?(?:;charset=[^;,]+)?;base64,", re.I)
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 
 def _parse_data_uri(s: str) -> Tuple[str, str]:
     """
@@ -58,7 +63,10 @@ def _decode_b64_and_mime(s: str) -> Tuple[bytes, str]:
     if not payload:
         return b"", mime
     try:
-        return base64.b64decode(payload, validate=True), mime
+        data = base64.b64decode(payload, validate=True)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise serializers.ValidationError("Payload too large.")
+        return data, mime
     except Exception:
         raise serializers.ValidationError("Invalid base64 payload (data URI supported).")
 
@@ -87,13 +95,12 @@ def _ext_from_mime(mime: str) -> str:
 
 def _safe_stem_from_title(title: str, fallback: str) -> str:
     base = (title or "").strip() or fallback
+    # drop trailing extension-like piece from title
+    base = re.sub(r"\.[A-Za-z0-9]{1,6}$", "", base)
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-._")
-    if not base:
-        base = fallback
-    return base[:80]
+    return (base or fallback)[:80]
 
 def _document_ext_allowed(ext: str) -> bool:
-    """Check Document.file's FileExtensionValidator if present."""
     try:
         from django.core.validators import FileExtensionValidator
         f = Document._meta.get_field("file")
@@ -101,11 +108,9 @@ def _document_ext_allowed(ext: str) -> bool:
             if isinstance(v, FileExtensionValidator):
                 allowed = {e.lstrip(".").lower() for e in v.allowed_extensions}
                 return ext.lstrip(".").lower() in allowed
+        return True  # no validator -> allow
     except Exception:
-        # If anything goes wrong, don't block here; model validation will still run.
         return True
-    return True
-
 
 # ----- Voices -----
 class VoiceReadSerializer(serializers.ModelSerializer):
@@ -144,6 +149,8 @@ class VoiceWriteSerializer(serializers.ModelSerializer):
             setattr(instance, f, v)
         if raw:
             blob, mime = _decode_b64_and_mime(raw)
+            if not blob:
+                raise serializers.ValidationError("preview_b64 decoded to empty content.")
             ext = _ext_from_mime(mime)
             instance.preview = ContentFile(blob, name=f"preview{ext}")
         instance.save()
@@ -239,14 +246,14 @@ class SessionWriteSerializer(serializers.ModelSerializer):
 
     def create(self, validated):
         bot_id = validated.pop("bot_id")
-        agent = Agent.objects.get(bot_id=bot_id)
+        agent = get_object_or_404(Agent, bot_id=bot_id)
         return Session.objects.create(agent=agent, **validated)
 
     def update(self, instance: Session, validated):
         # If bot_id provided on update, switch the agent
         bot_id = validated.pop("bot_id", None)
         if bot_id:
-            instance.agent = Agent.objects.get(bot_id=bot_id)
+            instance.agent = get_object_or_404(Agent, bot_id=bot_id)
         for f in ("title", "summary", "is_active"):
             if f in validated:
                 setattr(instance, f, validated[f])
@@ -281,14 +288,14 @@ class ChatWriteSerializer(serializers.ModelSerializer):
 
     def create(self, validated):
         thread_id = validated.pop("thread_id")
-        sess = Session.objects.get(thread_id=thread_id)
+        sess = get_object_or_404(Session, thread_id=thread_id)
         return Chat.objects.create(session=sess, **validated)
 
     def update(self, instance: Chat, validated):
         # Allow switching session via thread_id on update if provided
         thread_id = validated.pop("thread_id", None)
         if thread_id:
-            instance.session = Session.objects.get(thread_id=thread_id)
+            instance.session = get_object_or_404(Session, thread_id=thread_id)
         for f in ("query", "response", "emotion", "meta"):
             if f in validated:
                 setattr(instance, f, validated[f])
@@ -338,7 +345,7 @@ class SlidesWriteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated):
         thread_id = validated.pop("thread_id")
-        sess = Session.objects.select_for_update().get(thread_id=thread_id)
+        sess = get_object_or_404(Session, thread_id=thread_id)
         rotate = bool(validated.pop("rotate", True))
         updated_by = (validated.pop("updated_by", "") or self._who())[:64]
 
@@ -364,7 +371,7 @@ class SlidesWriteSerializer(serializers.ModelSerializer):
         # Allow switching underlying session via thread_id
         thread_id = validated.pop("thread_id", None)
         if thread_id:
-            instance.session = Session.objects.get(thread_id=thread_id)
+            instance.session = get_object_or_404(Session, thread_id=thread_id)
 
         rotate = bool(validated.pop("rotate", True))
         updated_by = (validated.pop("updated_by", "") or self._who())[:64]
@@ -379,7 +386,7 @@ class SlidesWriteSerializer(serializers.ModelSerializer):
         else:
             if "title" in validated:     instance.title = title or ""
             if "summary" in validated:   instance.summary = summary or ""
-            if "editorjs" in validated:  instance.editorjs = editor or ""
+            if "editorjs" in validated:  instance.editorjs = editor or {}
             instance.updated_by = updated_by
             instance.save(update_fields=["title", "summary", "editorjs", "updated_by", "updated_at"])
 

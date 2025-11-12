@@ -274,7 +274,7 @@ export default function SlidesPane({ className = '', incoming, streaming = false
       title: title || 'Untitled Deck',
       summary: summary || '',
       editorjs: ejData,
-      rotate: false,
+      rotate: true,
       updated_by: 'ui',
       version: versionRef.current,
     }

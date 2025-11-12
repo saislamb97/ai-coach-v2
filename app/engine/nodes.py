@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 
 from agent.models import Agent
+from engine.tools.utils import deck_facts_from_snapshot
 from engine.tokens import TokenLimits
 from memory.models import Session
 from engine.tools.registry import AGENT_TOOLS, TOOLS_SCHEMA, set_tool_context
@@ -20,6 +21,7 @@ from .tts_stt import synthesize_tts_async
 from stream.text_sanitize import SanitizeOptions, sanitize_and_verbalize_text
 
 from .utils import (
+    _deck_snapshot_system_message,
     extract_sentences,
     build_text_system_prompt,
     build_router_system_prompt,
@@ -33,8 +35,8 @@ log = logging.getLogger(__name__)
 # =============================================================================
 @dataclass(frozen=True)
 class Settings:
-    text_temperature: float = 0.1
-    router_temperature: float = 0.1
+    text_temperature: float = 0
+    router_temperature: float = 0
     max_history_pairs: int = 50
     tool_timeout_s: int = 25               # wait for tool results so first reply includes them
     max_tool_calls: int = 6
@@ -206,7 +208,9 @@ async def _tool_router_and_stream(state: QAState):
             res = await asyncio.wait_for(impl.ainvoke(args), timeout=S.tool_timeout_s)
             status = (res or {}).get("status", "ok")
             summary = (res or {}).get("summary", "").strip()
-            state["tool_summaries"].append(f"[{name}] {status}: {summary}".strip())
+            # Store as multi-line (tools already emit bullet-friendly summaries)
+            pretty = f"[{name}] {status}:\n{summary}" if "\n" in summary else f"[{name}] {status}: {summary}"
+            state["tool_summaries"].append(pretty.strip())
             log.debug("[nodes:tool] %s -> %s", name, status)
         except asyncio.TimeoutError:
             msg = f"[{name}] timeout after {S.tool_timeout_s}s."
@@ -221,10 +225,11 @@ async def _tool_router_and_stream(state: QAState):
 
         # If a deck snapshot is returned, stream it immediately to the UI
         slide_tools = {
+            # slides tools (current names)
             "slides_generate_or_update",
-            "slides_fetch_latest",
-            "slides_list_versions",   # also returns latest deck
-            "slides_diff_latest",
+            "slides_fetch",
+            "slides_list_versions",
+            "slides_diff",
             "slides_revert",
             "slides_add_sections",
             "slides_remove_sections",
@@ -238,6 +243,12 @@ async def _tool_router_and_stream(state: QAState):
             if snap:
                 state["slides_tool_used"] = True
                 state["slides_latest"] = snap
+                try:
+                    facts = deck_facts_from_snapshot(snap)  # uses helper above
+                    state["deck_facts"] = facts
+                except Exception:
+                    log.exception("[nodes:router] failed building deck facts")
+
                 if state.get("queue"):
                     await state["queue"].put({"type": "slides_response", "slides": snap})
                     await state["queue"].put({"type": "slides_done"})
@@ -310,6 +321,11 @@ async def _stream_text_with_audio(state: QAState):
     if state.get("tool_summaries"):
         joined = "- " + "\n- ".join(s[:600] for s in state["tool_summaries"][:8])
         msgs.append(SystemMessage(content="TOOL UPDATES:\n" + joined))
+
+    deck_msg = _deck_snapshot_system_message(state)
+    if deck_msg:
+        # place it right before history/user for maximum salience
+        msgs.append(SystemMessage(content=deck_msg))
 
     msgs.extend(state["base_msgs"])
     msgs.append(state["user_msg"])

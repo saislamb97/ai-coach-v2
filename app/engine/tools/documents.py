@@ -16,7 +16,6 @@ from .utils import (
     TOKENS_PER_DOC_DEFAULT,
     MAX_SOURCES_PER_ANALYSIS,
     get_tool_context,
-    _ensure_agent_user_from_ctx,  # kept for parity; session is required below
     _db_list_docs,
     _rank_docs,
     _doc_content_snippet,
@@ -27,9 +26,9 @@ from .utils import (
 
 log = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------------------
+# ======================================================================================
 # Input Schemas (documents)
-# --------------------------------------------------------------------------------------
+# ======================================================================================
 class DocumentsListInput(BaseModel):
     query: Optional[str] = Field(None, description="Filter by title/file name (fuzzy).")
     limit: int = Field(20, ge=1, le=200, description="Max number of documents to list (per session)")
@@ -58,9 +57,9 @@ class DocumentsSlidesInput(BaseModel):
     slides_max_sections: int = Field(6, ge=3, le=16, description="Max sections in the deck")
     title_override: Optional[str] = Field(None, description="Optional deck title to force")
 
-# --------------------------------------------------------------------------------------
-# Helper for analyzer (inject meta into LLM context)
-# --------------------------------------------------------------------------------------
+# ======================================================================================
+# LLM helper (documents analysis with meta)
+# ======================================================================================
 async def _llm_analyze_sources(
     *, question: str, sources: List[Dict[str, Any]], model: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -78,23 +77,24 @@ async def _llm_analyze_sources(
     src_lines: List[str] = []
     for i, s in enumerate(sources, 1):
         title = _strip_ctrl(s.get("title") or s.get("file_name") or f"Source {i}")
-        meta_json = _pretty_meta_for_llm(s.get("meta"), max_len=1600)
-        snippet = _strip_ctrl((s.get("content") or "")[:4000])
+        # Keep meta compact to keep prompt small
+        meta_json = _pretty_meta_for_llm(s.get("meta"), max_len=1200)
+        snippet = _strip_ctrl((s.get("content") or "")[:3500])
         src_lines.append(f"[{i}] {title}\nMETA: {meta_json}\nCONTENT:\n{snippet}\n")
 
-    user = (
-        "SOURCES:\n\n" + "\n".join(src_lines) +
-        f"\nQUESTION:\n{_strip_ctrl(question.strip())}\n"
-    )
+    user = "SOURCES:\n\n" + "\n".join(src_lines) + f"\nQUESTION:\n{_strip_ctrl(question.strip())}\n"
 
     try:
-        msg = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user[:14000])])
+        msg = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user[:12000])])
         raw = (getattr(msg, "content", "") or "").strip()
         import json as _json
         data = _json.loads(raw if raw.startswith("{") else raw[raw.find("{"):raw.rfind("}") + 1])
+
         # sanitize
         data["answer"] = _strip_ctrl((data.get("answer") or "").strip())
-        data["bullets"] = [_strip_ctrl(b) for b in (data.get("bullets") or []) if isinstance(b, str) and b.strip()]
+        data["bullets"] = [
+            _strip_ctrl(b) for b in (data.get("bullets") or []) if isinstance(b, str) and b.strip()
+        ][:8]
         cits = data.get("citations") or []
         new_cits = []
         for c in cits:
@@ -106,9 +106,52 @@ async def _llm_analyze_sources(
     except Exception:
         return {"answer": "I don't have enough information in the provided sources.", "bullets": [], "citations": []}
 
-# --------------------------------------------------------------------------------------
+# ======================================================================================
+# Internal helpers
+# ======================================================================================
+def _mk_assets_payload(docs: List[Any], include_content: bool = False,
+                       sample_chars: int = MAX_EXTRACTED_CHARS_PER_DOC,
+                       token_cap: int = TOKENS_PER_DOC_DEFAULT) -> List[Dict[str, Any]]:
+    assets: List[Dict[str, Any]] = []
+    for d in docs:
+        payload: Dict[str, Any] = {
+            "title": (d.title or os.path.basename(d.file.name)),
+            "file_name": os.path.basename(d.file.name),
+            "updated_at": d.updated_at.isoformat(),
+            "index_status": d.index_status,
+            "sha256": d.sha256,
+            "meta": d.meta or {},
+        }
+        if include_content:
+            payload["content"] = _doc_content_snippet(d, limit_chars=sample_chars, token_cap=token_cap)
+        assets.append(payload)
+    return assets
+
+def _bulleted(lines: List[str]) -> str:
+    # Always multiline bullets; trim empties and cap to 8 lines
+    clean = [f"- {_strip_ctrl(x).strip()}" for x in lines if _strip_ctrl(x).strip()]
+    return "\n".join(clean[:8]) or "- (no details)"
+
+def _pack_slides_for_data(slides_obj) -> Dict[str, Any]:
+    """
+    Build slides payload in the same shape used by slides tools: {version,title,summary,editorjs,updated_at}.
+    Import lazily from slides to avoid circulars.
+    """
+    if not slides_obj:
+        return {}
+    from .slides import _ensure_editorjs  # lazy import
+    ej = _ensure_editorjs(getattr(slides_obj, "editorjs", {}) or {})
+    return {
+        "version": slides_obj.version,
+        "title": slides_obj.title or "",
+        "summary": slides_obj.summary or "",
+        "editorjs": ej,
+        "updated_at": slides_obj.updated_at.isoformat(),
+    }
+
+# ======================================================================================
 # Tools (SESSION-SCOPED)
-# --------------------------------------------------------------------------------------
+# ======================================================================================
 @tool(
     "documents_list",
     args_schema=DocumentsListInput,
@@ -118,32 +161,22 @@ async def documents_list(query: Optional[str] = None, limit: int = 20) -> Dict[s
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
+        return {"status": "failed", "summary": "- Missing session context.", "data": {}}
 
     items = await _db_list_docs(session_id=int(session_id), query=(query or "").strip(), limit=limit)
     ranked = _rank_docs(items, query) if query else items
 
-    assets = []
-    for d in ranked[:limit]:
-        assets.append(
-            {
-                "title": (d.title or os.path.basename(d.file.name)),
-                "file_name": os.path.basename(d.file.name),
-                "updated_at": d.updated_at.isoformat(),
-                "index_status": d.index_status,
-                "sha256": d.sha256,
-                "meta": d.meta or {},
-            }
-        )
+    assets = _mk_assets_payload(ranked[:limit], include_content=False)
 
     if not assets:
-        return {"status": "not_found", "summary": "No documents in this session.", "data": {"assets": []}}
+        return {"status": "not_found", "summary": "- No documents in this session.", "data": {"assets": []}}
 
-    # Caller-LLM friendly summary (include compact meta bits)
-    parts = []
-    for a in assets[:5]:
-        parts.append(f"{a['title']} ({_compact_meta_summary(a.get('meta'))})")
-    summary_out = f"Found {len(assets)} document(s): " + "; ".join(parts) + "."
+    # Caller-LLM-friendly summary (bulleted with compact meta bits)
+    parts = [f"{a['title']} ({_compact_meta_summary(a.get('meta'))})" for a in assets[:5]]
+    summary_out = _bulleted([
+        f"Found {len(assets)} document(s).",
+        *parts
+    ])
     return {"status": "ok", "summary": summary_out, "data": {"assets": assets}}
 
 @tool(
@@ -161,34 +194,23 @@ async def documents_fetch(
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
+        return {"status": "failed", "summary": "- Missing session context.", "data": {}}
 
     items = await _db_list_docs(session_id=int(session_id), query=(query or "").strip(), limit=200)
     if not items:
-        return {"status": "not_found", "summary": f"No documents found for “{query}”.", "data": {}}
+        return {"status": "not_found", "summary": f"- No documents found for “{_strip_ctrl(query)}”.", "data": {}}
 
     ranked = _rank_docs(items, query)[:limit]
-    assets = []
-    for d in ranked:
-        payload = {
-            "title": (d.title or os.path.basename(d.file.name)),
-            "file_name": os.path.basename(d.file.name),
-            "updated_at": d.updated_at.isoformat(),
-            "index_status": d.index_status,
-            "sha256": d.sha256,
-            "meta": d.meta or {},
-        }
-        if include_content:
-            payload["content"] = _doc_content_snippet(
-                d, limit_chars=sample_chars_per_doc, token_cap=tokens_per_doc
-            )
-        assets.append(payload)
+    assets = _mk_assets_payload(
+        ranked, include_content=include_content,
+        sample_chars=sample_chars_per_doc, token_cap=tokens_per_doc
+    )
 
-    # Include meta in the summary for the caller LLM
-    parts = []
-    for a in assets:
-        parts.append(f"{a['title']} ({_compact_meta_summary(a.get('meta'))})")
-    summary_out = f"Fetched {len(assets)} document(s): " + "; ".join(parts) + "."
+    parts = [f"{a['title']} ({_compact_meta_summary(a.get('meta'))})" for a in assets]
+    summary_out = _bulleted([
+        f"Fetched {len(assets)} document(s) for “{_strip_ctrl(query)}”.",
+        *parts
+    ])
     return {"status": "ok", "summary": summary_out, "data": {"assets": assets}}
 
 @tool(
@@ -206,22 +228,22 @@ async def documents_analyze(
     make_slides: bool = False,
     slides_max_sections: int = 6,
 ) -> Dict[str, Any]:
-    from .slides import (  # imported here to avoid circular import at module load
-        _llm_summarize_change,
+    # Lazy imports to avoid circular at module load
+    from .slides import (
         _llm_outline_to_editorjs,
         _slides_upsert_sync,
-        _format_slides_response,
+        _ensure_editorjs,
     )
 
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
+        return {"status": "failed", "summary": "- Missing session context.", "data": {}}
 
     derived_query = (search_query or "").strip()
     all_docs = await _db_list_docs(session_id=int(session_id), query=derived_query, limit=200)
     if not all_docs:
-        return {"status": "not_found", "summary": "No matching documents found in this session.", "data": {}}
+        return {"status": "not_found", "summary": "- No matching documents found in this session.", "data": {}}
 
     ranked = _rank_docs(all_docs, derived_query)[:limit_files] if derived_query else all_docs[:limit_files]
 
@@ -239,36 +261,45 @@ async def documents_analyze(
         )
 
     analysis = await _llm_analyze_sources(question=_strip_ctrl(question), sources=sources)
+
+    # Summary (bulleted)
     titles = ", ".join([s["title"] for s in sources])
-    bullets = analysis.get("bullets") or []
-    # Include meta summary for caller LLM
     meta_bits = "; ".join([_compact_meta_summary(s.get("meta")) for s in sources])
-    first_line = f"Analyzed {len(sources)} document(s): {titles}. {meta_bits}"
-    summary_out = (first_line + (("\n- " + "\n- ".join(bullets[:5])) if bullets else ""))[:1200]
+    bullets = analysis.get("bullets") or []
+    summary_lines = [
+        f"Analyzed {len(sources)} document(s): {titles}.",
+        meta_bits if meta_bits else "",
+        *bullets[:5],
+    ]
+    summary_out = _bulleted(summary_lines)
 
     out_data: Dict[str, Any] = {"analysis": analysis, "sources": sources}
 
     if make_slides:
-        slide_prompt = f"Create concise slides summarizing key insights for the question: {question}"
-        # Include meta in the context sent to the slide LLM as lightweight hints
+        # Ground slides on the same sources (content + compact meta)
         context_text = "\n\n".join(
             f"(META){_pretty_meta_for_llm(s['meta'], 600)}\n{_strip_ctrl((s.get('content') or '')[:2000])}"
             for s in sources
         )[:8000]
-        ej = await _llm_outline_to_editorjs(prompt=slide_prompt, context=context_text, max_sections=slides_max_sections)
+        prompt = f"Create concise slides summarizing key insights to answer: {question}"
+        ej = await _llm_outline_to_editorjs(prompt=prompt, context=context_text, max_sections=slides_max_sections)
+        ej = _ensure_editorjs(ej)
         try:
             deck_title = (sources[0]["title"] if sources else "Document Summary")[:140]
-            s, before_note = await _slides_upsert_sync(
-                session_id, title=deck_title, summary="", editorjs=ej, updated_by="tool:documents_analyze"
+            s, _before = await _slides_upsert_sync(
+                int(session_id), title=deck_title, summary="", editorjs=ej, updated_by="tool:documents_analyze"
             )
-            slides_data = await _format_slides_response(s)
-            after_note = f"title={s.title!r}, v={s.version}"
-            summary_slides = await _llm_summarize_change(title=s.title or "Deck", before_note=before_note, after_note=after_note)
-            summary_out = (summary_out + "\n" + summary_slides).strip()
-            out_data["slides"] = slides_data
+            out_data["slides"] = _pack_slides_for_data(s)
+            summary_out = _bulleted([
+                *summary_lines,
+                f"Created/updated slides v{s.version}."
+            ])
         except Exception as e:
             log.exception("[documents_analyze] slide generation failed")
-            summary_out = (summary_out + f"\nFailed to create slides: {e}").strip()
+            summary_out = _bulleted([
+                *summary_lines,
+                f"Failed to create slides: {e}"
+            ])
 
     return {"status": "ok", "summary": summary_out, "data": out_data}
 
@@ -285,21 +316,21 @@ async def documents_generate_slides(
     slides_max_sections: int = 6,
     title_override: Optional[str] = None,
 ) -> Dict[str, Any]:
-    from .slides import (  # imported here to avoid circular import at module load
-        _llm_summarize_change,
+    # Lazy imports to avoid circular at module load
+    from .slides import (
         _llm_outline_to_editorjs,
         _slides_upsert_sync,
-        _format_slides_response,
+        _ensure_editorjs,
     )
 
     ctx = get_tool_context()
     session_id = ctx.get("session_id")
     if not session_id:
-        return {"status": "failed", "summary": "Missing session context.", "data": {}}
+        return {"status": "failed", "summary": "- Missing session context.", "data": {}}
 
     items = await _db_list_docs(session_id=int(session_id), query=(query or "").strip(), limit=200)
     if not items:
-        return {"status": "not_found", "summary": f"No documents found for “{query}”.", "data": {}}
+        return {"status": "not_found", "summary": f"- No documents found for “{_strip_ctrl(query)}”.", "data": {}}
 
     ranked = _rank_docs(items, query)[:limit_files]
 
@@ -316,26 +347,28 @@ async def documents_generate_slides(
             }
         )
 
-    # Include meta along with content in the generation context
+    # Generation context (content + compact meta)
     context_text = "\n\n".join(
         f"(META){_pretty_meta_for_llm(s['meta'], 600)}\n{_strip_ctrl((s.get('content') or '')[:2000])}"
         for s in sources
     )[:8000]
     prompt = f"Create concise slides summarizing the key ideas from the selected document(s) about: {query}"
     ej = await _llm_outline_to_editorjs(prompt=prompt, context=context_text, max_sections=slides_max_sections)
+    ej = _ensure_editorjs(ej)
 
     try:
         deck_title = (title_override or (sources[0]["title"] if sources else "Slides"))[:140]
-        s, before_note = await _slides_upsert_sync(
-            session_id, title=deck_title, summary="", editorjs=ej, updated_by="tool:documents_generate_slides"
+        s, _before = await _slides_upsert_sync(
+            int(session_id), title=deck_title, summary="", editorjs=ej, updated_by="tool:documents_generate_slides"
         )
-        slides_data = await _format_slides_response(s)
-        after_note = f"title={s.title!r}, v={s.version}"
-        summary_slides = await _llm_summarize_change(title=s.title or "Deck", before_note=before_note, after_note=after_note)
+        slides_payload = _pack_slides_for_data(s)
         names = ", ".join([src["title"] for src in sources])
         meta_bits = "; ".join([_compact_meta_summary(src.get("meta")) for src in sources])
-        summary_out = f"Built slides v{s.version} from {len(sources)} doc(s): {names}. {meta_bits}\n{summary_slides}"
-        return {"status": "ok", "summary": summary_out, "data": {"slides": slides_data, "sources": sources}}
+        summary_out = _bulleted([
+            f"Built slides v{s.version} from {len(sources)} document(s): {names}.",
+            meta_bits if meta_bits else "",
+        ])
+        return {"status": "ok", "summary": summary_out, "data": {"slides": slides_payload, "sources": sources}}
     except Exception as e:
         log.exception("[documents_generate_slides] persist error")
-        return {"status": "failed", "summary": f"Failed to generate slides: {e}", "data": {}}
+        return {"status": "failed", "summary": f"- Failed to generate slides: {e}", "data": {}}
