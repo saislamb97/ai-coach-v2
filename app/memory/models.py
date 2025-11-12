@@ -281,6 +281,7 @@ class Document(TimeStampedModel):
         UNINDEXED = "unindexed", "Unindexed"
         INDEXED = "indexed", "Indexed"
         FAILED = "failed", "Failed"
+        DUPLICATE = "duplicate", "Duplicate" 
 
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="documents")
     title = models.CharField(max_length=255, blank=True, default="")
